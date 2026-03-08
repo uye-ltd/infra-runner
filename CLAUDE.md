@@ -169,25 +169,42 @@ cache and TLS certs survive every runner redeploy.
 
 ## First-time server setup
 
+The runner runs under a dedicated `ghrunner` user that has no password and
+belongs to the `docker` group.
+
 ```bash
-# 1. Generate an SSH key pair (on your local machine)
-ssh-keygen -t ed25519 -C "github-deploy" -f ~/.ssh/uye_runner_deploy
-# Add ~/.ssh/uye_runner_deploy.pub to ~/.ssh/authorized_keys on the server
-# Add ~/.ssh/uye_runner_deploy (private key) as the DEPLOY_SSH_KEY secret
+# 1. Create the dedicated user (run as your main sudo-capable user)
+sudo useradd -m -s /bin/bash ghrunner
+sudo usermod -aG docker ghrunner
 
-# 2. On the server: authenticate with GHCR (once; creds persist in ~/.docker/config.json)
-echo YOUR_GHCR_PAT | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
+# 2. Generate the deploy SSH key pair (as ghrunner)
+sudo -iu ghrunner
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+ssh-keygen -t ed25519 -C deploy -f ~/.ssh/uye_runner_deploy
+# No passphrase — GitHub Actions must use the key non-interactively
 
-# 3. Clone the repo and configure
+# 3. Authorize the key for SSH login
+cat ~/.ssh/uye_runner_deploy.pub >> ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+
+# 4. Copy the private key into the DEPLOY_SSH_KEY GitHub secret
+cat ~/.ssh/uye_runner_deploy
+
+# 5. Authenticate with GHCR (creds persist in ~/.docker/config.json)
+echo YOUR_PAT | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
+
+# 6. Clone the repo and configure
 git clone https://github.com/YOUR_ORG/uye-runner ~/uye-runner
 cd ~/uye-runner
 cp .env.example .env
 $EDITOR .env   # set GITHUB_TOKEN and GITHUB_ORG
 
-# 4. Initial start
+# 7. Initial start
 docker compose up -d
 docker compose logs -f runner
 ```
+
+Set `DEPLOY_USER` secret to `ghrunner`.
 
 After this, every push to `main` will rebuild the image and redeploy the
 runner automatically.
@@ -242,6 +259,12 @@ docker compose up -d runner
 ---
 
 ## GitHub PAT scopes required
+
+**Must use a classic token.** Fine-grained personal access tokens do not
+support `manage_runners:org` and cannot be used here.
+
+Create at: https://github.com/settings/tokens → **Tokens (classic)** →
+Generate new token (classic).
 
 | Scope | Why |
 |---|---|

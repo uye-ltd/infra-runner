@@ -20,7 +20,8 @@ The runner container has the Docker CLI but no daemon. Every `docker build` / `d
 ## Prerequisites
 
 - Docker + Docker Compose v2 on the host
-- A GitHub PAT with `manage_runners:org` scope
+- A GitHub **classic** PAT with `manage_runners:org` and `read:packages` scopes
+  (fine-grained tokens do not support `manage_runners:org`)
 - The GitHub org slug you want to attach the runner to
 
 ---
@@ -54,7 +55,7 @@ Copy `.env.example` to `.env` and fill in:
 
 | Variable | Required | Description |
 |---|---|---|
-| `GITHUB_TOKEN` | yes | PAT with `manage_runners:org` scope |
+| `GITHUB_TOKEN` | yes | Classic PAT with `manage_runners:org` + `read:packages` scopes |
 | `GITHUB_ORG` | yes | GitHub org slug (e.g. `acme`) |
 | `RUNNER_NAME` | no | Display name — defaults to container hostname |
 | `RUNNER_LABELS` | no | Comma-separated labels, default `self-hosted,linux,x64` |
@@ -79,14 +80,29 @@ Add these in **Settings → Secrets → Actions**:
 | Secret | Value |
 |---|---|
 | `DEPLOY_HOST` | Server IP or hostname |
-| `DEPLOY_USER` | SSH username (e.g. `ubuntu`) |
-| `DEPLOY_SSH_KEY` | Private key PEM (ed25519 recommended) |
+| `DEPLOY_USER` | `ghrunner` (dedicated deploy user) |
+| `DEPLOY_SSH_KEY` | Private key PEM generated on the server (see server setup below) |
 
-### One-time server auth with GHCR
+### Server setup
 
-The server needs credentials to pull the image:
+Run once on the server to create a dedicated user and configure SSH:
 
 ```bash
+# As your main user
+sudo useradd -m -s /bin/bash ghrunner
+sudo usermod -aG docker ghrunner
+
+# As ghrunner
+sudo -iu ghrunner
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+ssh-keygen -t ed25519 -C deploy -f ~/.ssh/uye_runner_deploy  # no passphrase
+cat ~/.ssh/uye_runner_deploy.pub >> ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+
+# Paste the private key into the DEPLOY_SSH_KEY GitHub secret
+cat ~/.ssh/uye_runner_deploy
+
+# Authenticate with GHCR (persists in ~/.docker/config.json)
 echo YOUR_PAT | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
 ```
 
