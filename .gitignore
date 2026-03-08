@@ -1,0 +1,8 @@
+.env
+
+# GitHub Actions runner config artifacts
+.runner
+.credentials
+.credentials_rsaparams
+_diag/
+_work/

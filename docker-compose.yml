@@ -1,0 +1,28 @@
+services:
+  dind:
+    image: docker:27-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: /certs
+    volumes:
+      - dind-certs:/certs
+      - dind-storage:/var/lib/docker
+    restart: unless-stopped
+
+  runner:
+    image: ghcr.io/${GITHUB_ORG}/uye-runner:latest
+    build: .  # used locally; CI publishes the image to GHCR
+    depends_on:
+      - dind
+    env_file: .env
+    environment:
+      DOCKER_HOST: tcp://dind:2376
+      DOCKER_TLS_VERIFY: "1"
+      DOCKER_CERT_PATH: /certs/client
+    volumes:
+      - dind-certs:/certs:ro
+    restart: unless-stopped
+
+volumes:
+  dind-certs:
+  dind-storage:
