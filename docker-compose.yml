@@ -13,10 +13,10 @@ services:
     image: ghcr.io/${GITHUB_ORG}/uye-runner:latest
     build: .  # used locally; CI publishes the image to GHCR
     depends_on:
-      - dind
+      - docker
     env_file: .env
     environment:
-      DOCKER_HOST: tcp://dind:2376
+      DOCKER_HOST: tcp://docker:2376
       DOCKER_TLS_VERIFY: "1"
       DOCKER_CERT_PATH: /certs/client
     volumes:
