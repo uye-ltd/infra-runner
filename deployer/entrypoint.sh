@@ -108,6 +108,13 @@ set_healthy
 log info "Deployer starting" project "${COMPOSE_PROJECT_NAME}" poll_interval "${POLL_INTERVAL}s"
 log info "Signature policy" identity "${CERT_IDENTITY}"
 
+# Authenticate with GHCR using the PAT already present in the environment.
+# docker pull delegates auth to the calling client (not the daemon), so the
+# CLI inside this container needs its own credentials.
+log info "Authenticating with GHCR"
+echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ORG}" --password-stdin \
+  || log warn "GHCR login failed — pulls of private images will fail"
+
 # ---------------------------------------------------------------------------
 # Graceful shutdown
 # ---------------------------------------------------------------------------

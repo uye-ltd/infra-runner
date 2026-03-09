@@ -170,6 +170,14 @@ trap shutdown SIGTERM SIGINT
 # ---------------------------------------------------------------------------
 
 log info "Controller starting" image "${RUNNER_IMAGE}" desired_idle "${DESIRED_IDLE}"
+
+# Authenticate with GHCR using the PAT already present in the environment.
+# docker pull delegates auth to the calling client (not the daemon), so the
+# CLI inside this container needs its own credentials.
+log info "Authenticating with GHCR"
+echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ORG}" --password-stdin \
+  || log warn "GHCR login failed — pulls of private images will fail"
+
 log info "Checking for orphaned resources from previous run"
 cleanup_all_managed
 log info "Pre-pulling runner image"
