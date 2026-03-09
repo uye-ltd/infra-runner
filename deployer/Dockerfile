@@ -23,16 +23,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # cosign — verifies image signatures before the deployer applies any update.
 # Keyless verification: no private key stored here; trust is anchored to the
 # GitHub Actions OIDC identity that signed the image in CI.
-ARG COSIGN_VERSION=2.4.3
-RUN set -e \
-    && curl -fsSL \
-         "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64" \
-         -o /usr/local/bin/cosign \
-    && expected=$(curl -fsSL \
-         "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64.sha256" \
-         | awk '{print $1}') \
-    && echo "${expected}  /usr/local/bin/cosign" | sha256sum -c \
-    && chmod +x /usr/local/bin/cosign
+# Copied from the official image (same pattern as Kaniko in the runner Dockerfile)
+# so Dependabot can track the version via this FROM reference.
+COPY --from=gcr.io/projectsigstore/cosign:v2.4.1 /ko-app/cosign /usr/local/bin/cosign
 
 COPY entrypoint.sh /entrypoint.sh
 COPY health_server.py /health_server.py
