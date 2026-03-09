@@ -39,7 +39,7 @@ jobs:
       - name: Log in to GHCR
         # Skip login on fork PRs — they have no secret access
         if: github.event_name == 'push'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
