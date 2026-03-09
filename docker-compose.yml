@@ -11,7 +11,7 @@ services:
   # ---------------------------------------------------------------------------
 
   controller-proxy:
-    image: tecnativa/docker-socket-proxy:0.7.0
+    image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -27,7 +27,7 @@ services:
       - controller-proxy-net
 
   deployer-proxy:
-    image: tecnativa/docker-socket-proxy:0.7.0
+    image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro

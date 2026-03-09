@@ -217,7 +217,7 @@ Pull failures are logged as warnings; the loop continues.
 ## docker-compose.yml details
 
 **Socket proxies** (`controller-proxy`, `deployer-proxy`)
-- Image: `tecnativa/docker-socket-proxy:0.7.0`
+- Image: `tecnativa/docker-socket-proxy@sha256:1f3a6...`
 - Each mounts `/var/run/docker.sock:ro` and exposes port `2375` on an internal network
 - Allowed API groups: `CONTAINERS`, `NETWORKS`, `IMAGES`, `POST`, `DELETE`, `INFO`
 - Deployer proxy additionally allows: `VOLUMES`
@@ -378,7 +378,7 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
   Runners receive only a short-lived registration token that expires after one use.
 - **`--ephemeral` ensures single-use.** Even if a job attempts to persist a backdoor in
   the container filesystem, the container is destroyed before any subsequent job runs.
-- **Docker socket proxies** (`tecnativa/docker-socket-proxy:0.7.0`) sit between each service
+- **Docker socket proxies** (`tecnativa/docker-socket-proxy@sha256:1f3a6...`) sit between each service
   and `/var/run/docker.sock`. Controller and deployer connect via `DOCKER_HOST=tcp://proxy:2375`.
   `EXEC` and `BUILD` are disabled on both proxies — these are the primary escape vectors.
   The proxy containers themselves still mount the raw socket (unavoidable); they are minimal,
