@@ -47,7 +47,7 @@ jobs:
 
       - name: Build and push runner image
         id: build-runner
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: ${{ github.event_name == 'push' }}
@@ -57,7 +57,7 @@ jobs:
 
       - name: Build and push controller image
         id: build-controller
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./controller
           push: ${{ github.event_name == 'push' }}
@@ -67,7 +67,7 @@ jobs:
 
       - name: Build and push deployer image
         id: build-deployer
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./deployer
           push: ${{ github.event_name == 'push' }}
