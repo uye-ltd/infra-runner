@@ -32,7 +32,7 @@ no SSH push from CI is required.
 │   ├── entrypoint.sh                 # GitOps loop: verify sig → pull → docker compose up -d
 │   └── health_server.py              # minimal Python HTTP server for GET /health
 ├── scripts/
-│   ├── github-app-token.sh           # GitHub App JWT helper (sourced by controller): RS256 JWT → installation token
+│   ├── github-app-token.sh           # GitHub App JWT helper (sourced by controller + deployer): RS256 JWT → installation token
 │   ├── logging.sh                    # shared structured JSON log() function (sourced by controller + deployer)
 │   ├── setup-apparmor.sh             # one-time: install + load AppArmor profile
 │   └── setup-egress-policy.sh        # one-time: configure Docker address pool + iptables egress rules
@@ -199,11 +199,18 @@ All per-job resources carry labels `runner-managed=true` and `runner-job-id={id}
 
 ```
 Startup:
+  Auth path A (preferred): GITHUB_APP_ID + GITHUB_APP_INSTALLATION_ID + GITHUB_APP_PRIVATE_KEY_PATH
+    → source scripts/github-app-token.sh
+    → acquire_github_token(): RS256 JWT → POST /app/installations/{id}/access_tokens → GITHUB_TOKEN
+  Auth path B (fallback): GITHUB_TOKEN set directly → used as-is, App flow skipped
+  docker login ghcr.io (using the token from above)
   1. Start health_server.py in background (serves GET /health from /tmp/health)
   2. set_healthy()  ← write {"status":"ok"} to /tmp/health
   3. Log startup info (JSON)
 
 Poll loop (every POLL_INTERVAL seconds):
+
+  0. maybe_refresh_github_token()  ← no-op on PAT path; refreshes + re-logins at 55 min on App path
 
   1. Self-update:
      pull_if_new(deployer:latest)  ← compare local digest before/after pull
@@ -245,7 +252,7 @@ Pull failures are logged as warnings and set the health endpoint to unhealthy.
 **Socket proxies** (`controller-proxy`, `deployer-proxy`)
 - Image: `tecnativa/docker-socket-proxy@sha256:1f3a6...`
 - Each mounts `/var/run/docker.sock:ro` and exposes port `2375` on an internal network
-- Allowed API groups: `CONTAINERS`, `NETWORKS`, `IMAGES`, `POST`, `DELETE`, `INFO`
+- Allowed API groups: `CONTAINERS`, `NETWORKS`, `IMAGES`, `AUTH`, `POST`, `DELETE`, `INFO`
 - Deployer proxy additionally allows: `VOLUMES`
 - Disabled on both: `EXEC=0`, `BUILD=0`, `PLUGINS=0`, `SYSTEM=0`, `SWARM=0`, `SECRETS=0`
 - Resource limits: `memory: 128m`, `cpus: 0.25` — prevents a runaway proxy from affecting the host

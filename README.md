@@ -46,7 +46,7 @@ Per job (created and destroyed by the controller):
 
 - Docker + Docker Compose v2 on the host
 - The GitHub org slug you want to attach runners to
-- **One** of the following for controller authentication:
+- **One** of the following for authentication (used by both controller and deployer):
   - **GitHub App** (recommended) — a GitHub App installed on the org with
     *Self-hosted runners: Read & write*, *Members: Read*, and *Packages: Read* permissions.
     You will need the App ID, installation ID, and a downloaded private key PEM file.
@@ -308,8 +308,8 @@ release. The build fails at verification if the hash does not match.
 
 ### Option A — GitHub App (recommended)
 
-GitHub App installation tokens are short-lived (1 hour), auto-refreshed by the controller,
-and scoped to a single installation — no manual rotation required.
+GitHub App installation tokens are short-lived (1 hour), auto-refreshed by both the controller
+and the deployer, and scoped to a single installation — no manual rotation required.
 
 1. Create a GitHub App in your org (**Settings → Developer settings → GitHub Apps → New GitHub App**).
 2. Grant these **organization** permissions:
@@ -319,10 +319,11 @@ and scoped to a single installation — no manual rotation required.
 3. Install the App on the org and note the **installation ID** (visible in the URL of the
    install page: `github.com/organizations/YOUR_ORG/settings/installations/<id>`).
 4. Generate a private key (PEM) from the App settings page and store it on the server.
-5. Mount the PEM file into the controller container and set the three env vars:
+5. Mount the PEM file into **both** the controller and deployer containers and set the three env vars
+   on each service:
 
 ```yaml
-# In docker-compose.yml, under controller:
+# In docker-compose.yml, under both controller: and deployer:
 environment:
   GITHUB_APP_ID: "123456"
   GITHUB_APP_INSTALLATION_ID: "78901234"

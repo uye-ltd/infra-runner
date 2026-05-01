@@ -19,6 +19,7 @@ services:
       CONTAINERS: 1   # spawn, inspect, list, remove runner containers
       NETWORKS:   1   # create and remove per-job bridge networks
       IMAGES:     1   # docker pull runner image
+      AUTH:       1   # docker login ghcr.io (POST /auth) for GHCR credentials
       POST:       1   # allow write operations
       DELETE:     1   # allow delete operations
       INFO:       1   # docker info (used by compose internals)
@@ -41,6 +42,7 @@ services:
       NETWORKS:   1   # docker compose manages compose networks
       IMAGES:     1   # docker pull for digest checks
       VOLUMES:    1   # docker compose inspects volumes
+      AUTH:       1   # docker login ghcr.io (POST /auth) for GHCR credentials
       POST:       1
       DELETE:     1
       INFO:       1
