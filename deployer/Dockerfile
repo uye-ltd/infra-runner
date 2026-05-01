@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=gcr.io/projectsigstore/cosign:v2.4.1@sha256:b03690aa52bfe94054187142fba24dc54137650682810633901767d8a3e15b31 /ko-app/cosign /usr/local/bin/cosign
 
 COPY scripts/logging.sh /scripts/logging.sh
+COPY scripts/github-app-token.sh /scripts/github-app-token.sh
 COPY deployer/entrypoint.sh /entrypoint.sh
 COPY deployer/health_server.py /health_server.py
 RUN chmod +x /entrypoint.sh
