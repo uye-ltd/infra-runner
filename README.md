@@ -21,7 +21,7 @@ Per job (created and destroyed by the controller):
 
 **Controller** maintains a warm pool of idle runners (`DESIRED_IDLE`, default 2). When a runner picks up a job it exits. The controller tears down all per-job resources and spawns a replacement.
 
-**Runner containers** have no Docker socket and no privileged flag. Image builds use [Kaniko](https://github.com/GoogleContainerTools/kaniko), which builds from a Dockerfile in userspace without a daemon. `GITHUB_TOKEN` never enters a runner — only a short-lived registration token is injected at spawn time.
+**Runner containers** have no Docker socket and no privileged flag. Image builds use [Kaniko](https://github.com/GoogleContainerTools/kaniko), which builds from a Dockerfile in userspace without a daemon. The controller's credential (GitHub App token or PAT) never enters runner containers — only a short-lived, single-use registration token is injected at spawn time.
 
 ---
 
@@ -31,7 +31,7 @@ Per job (created and destroyed by the controller):
 |---|---|
 | Malicious job leaves persistent state | Container destroyed after every job (`--ephemeral`) |
 | Privileged container escape | No privileged flag — Kaniko builds in userspace, no DinD |
-| PAT theft | `GITHUB_TOKEN` stays in the controller; runners get only a short-lived registration token |
+| Credential theft | Controller credential (App token or PAT) stays in the controller; runners get only a short-lived registration token |
 | Docker socket abuse | Socket proxy allows only required API endpoints; `EXEC` and `BUILD` disabled on both proxies |
 | Supply chain / image tampering | cosign keyless signing in CI; deployer verifies signature before every pull; runner binary SHA256-verified at build time; CI actions pinned to commit SHAs |
 | Resource abuse (mining, DoS) | `--memory` and `--cpus` limits on every runner container; socket proxies capped at 128 MB / 0.25 CPU |
@@ -45,9 +45,13 @@ Per job (created and destroyed by the controller):
 ## Prerequisites
 
 - Docker + Docker Compose v2 on the host
-- A GitHub **classic** PAT with `admin:org`, `manage_runners:org`, and `read:packages` scopes
-  (fine-grained tokens do not support `manage_runners:org`)
 - The GitHub org slug you want to attach runners to
+- **One** of the following for controller authentication:
+  - **GitHub App** (recommended) — a GitHub App installed on the org with
+    *Self-hosted runners: Read & write*, *Members: Read*, and *Packages: Read* permissions.
+    You will need the App ID, installation ID, and a downloaded private key PEM file.
+  - **Classic PAT** (backward compat) — `admin:org`, `manage_runners:org`, `read:packages` scopes.
+    Fine-grained tokens do not support `manage_runners:org`.
 
 ---
 
@@ -86,13 +90,17 @@ sudo usermod -aG docker ghrunner
 
 # 2. Authenticate with GHCR (as ghrunner)
 sudo -iu ghrunner
-echo YOUR_PAT | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
+echo YOUR_PAT_OR_APP_TOKEN | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
 
 # 3. Clone and configure
 git clone https://github.com/YOUR_ORG/infra-runner ~/infra-runner
 cd ~/infra-runner
 cp .env.example .env
-$EDITOR .env   # required: GITHUB_TOKEN, GITHUB_ORG, COMPOSE_PROJECT_NAME
+$EDITOR .env   # required: GITHUB_ORG, COMPOSE_PROJECT_NAME
+               # auth — pick one:
+               #   GitHub App (recommended): GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID,
+               #                             GITHUB_APP_PRIVATE_KEY_PATH
+               #   Static PAT (fallback):    GITHUB_TOKEN
                # recommended: RUNNER_SECCOMP_HOST_PATH
 
 # 4. Pull and start (pulls all four services from GHCR)
@@ -118,11 +126,22 @@ This prevents PR workflows from unknown contributors from queuing at all.
 
 ## Environment variables
 
-Copy `.env.example` to `.env`:
+Copy `.env.example` to `.env`. Exactly one auth path must be configured:
+
+**GitHub App (recommended)**
+
+| Variable | Required | Description |
+|---|---|---|
+| `GITHUB_APP_ID` | yes (App) | Numeric GitHub App ID |
+| `GITHUB_APP_INSTALLATION_ID` | yes (App) | Numeric org installation ID |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | yes (App) | Container path to the PEM key (mounted `:ro`) |
+
+**Static PAT (backward compat)** — set `GITHUB_TOKEN` and leave the App vars unset.
+
+**All other variables:**
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `GITHUB_TOKEN` | yes | — | Classic PAT: `admin:org`, `manage_runners:org`, `read:packages` |
 | `GITHUB_ORG` | yes | — | GitHub org slug (e.g. `acme`) |
 | `GITHUB_REPO` | no | `infra-runner` | Repo name; used to construct the cosign certificate identity |
 | `RUNNER_LABELS` | no | `self-hosted,linux,x64` | Comma-separated runner labels |
@@ -171,8 +190,8 @@ jobs:
             --cleanup
 ```
 
-`docker/login-action` writes credentials to `~/.docker/config.json`. Kaniko reads from
-there automatically. No `--registry-*` flags needed.
+`docker/login-action` writes credentials to `~/.docker/config.json` (on a tmpfs inside
+the runner container). Kaniko reads from there automatically. No `--registry-*` flags needed.
 
 `--cleanup` removes extracted image layers after the build, keeping disk usage low.
 Kaniko's scratch space is limited to `RUNNER_KANIKO_SIZE` (default `5g`) via tmpfs.
@@ -285,7 +304,34 @@ release. The build fails at verification if the hash does not match.
 
 ---
 
-## GitHub PAT scopes
+## GitHub authentication
+
+### Option A — GitHub App (recommended)
+
+GitHub App installation tokens are short-lived (1 hour), auto-refreshed by the controller,
+and scoped to a single installation — no manual rotation required.
+
+1. Create a GitHub App in your org (**Settings → Developer settings → GitHub Apps → New GitHub App**).
+2. Grant these **organization** permissions:
+   - *Self-hosted runners*: Read & write
+   - *Members*: Read
+   - *Packages*: Read (if your runner image is in a private GHCR package)
+3. Install the App on the org and note the **installation ID** (visible in the URL of the
+   install page: `github.com/organizations/YOUR_ORG/settings/installations/<id>`).
+4. Generate a private key (PEM) from the App settings page and store it on the server.
+5. Mount the PEM file into the controller container and set the three env vars:
+
+```yaml
+# In docker-compose.yml, under controller:
+environment:
+  GITHUB_APP_ID: "123456"
+  GITHUB_APP_INSTALLATION_ID: "78901234"
+  GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github_app_key
+volumes:
+  - /path/on/host/github-app.pem:/run/secrets/github_app_key:ro
+```
+
+### Option B — Classic PAT (backward compat)
 
 Use a **classic token** — fine-grained tokens do not support `manage_runners:org`.
 
@@ -296,3 +342,5 @@ Create at: **github.com/settings/tokens → Tokens (classic)**
 | `manage_runners:org` | Register/deregister org-level runners |
 | `admin:org` | Required alongside `manage_runners:org` |
 | `read:packages` | Pull runner image from GHCR (if package is private) |
+
+Set `GITHUB_TOKEN=ghp_...` in `.env`. Leave all `GITHUB_APP_*` vars unset.

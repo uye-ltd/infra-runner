@@ -32,6 +32,7 @@ no SSH push from CI is required.
 │   ├── entrypoint.sh                 # GitOps loop: verify sig → pull → docker compose up -d
 │   └── health_server.py              # minimal Python HTTP server for GET /health
 ├── scripts/
+│   ├── github-app-token.sh           # GitHub App JWT helper (sourced by controller): RS256 JWT → installation token
 │   ├── logging.sh                    # shared structured JSON log() function (sourced by controller + deployer)
 │   ├── setup-apparmor.sh             # one-time: install + load AppArmor profile
 │   └── setup-egress-policy.sh        # one-time: configure Docker address pool + iptables egress rules
@@ -55,7 +56,7 @@ docker-compose (172.20.0.0/24 service space)
 │
 ├── controller  (infra-runner-controller — 172.20.0.64/26)
 │   ├── DOCKER_HOST=tcp://controller-proxy:2375  ← no direct socket mount
-│   └── env: GITHUB_TOKEN, GITHUB_ORG, RUNNER_IMAGE, pool/limit settings
+│   └── env: GITHUB_APP_* (or GITHUB_TOKEN fallback), GITHUB_ORG, RUNNER_IMAGE, pool/limit settings
 │
 ├── deployer-proxy  (tecnativa/docker-socket-proxy — 172.20.128.0/26)
 │   └── /var/run/docker.sock:ro  ← same API filtering
@@ -72,8 +73,9 @@ Per job — created by controller, destroyed after job completes:
 
 The runner container has no Docker socket and no privileged flag. Image builds use
 **Kaniko**, which builds Docker images from a Dockerfile entirely in userspace without
-a daemon or a privileged container. `GITHUB_TOKEN` (the PAT) lives only in the
-controller — runner containers receive only a short-lived registration token.
+a daemon or a privileged container. The controller's GitHub credential (App installation
+token or PAT) never enters runner containers — runners receive only a short-lived
+registration token.
 
 ---
 
@@ -81,9 +83,21 @@ controller — runner containers receive only a short-lived registration token.
 
 Loaded from `.env` (via `env_file` in Compose).
 
+**Authentication** — exactly one of the following two paths must be configured:
+
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `GITHUB_TOKEN` | yes | — | Classic PAT: `admin:org`, `manage_runners:org`, `read:packages` |
+| `GITHUB_APP_ID` | App path | — | Numeric GitHub App ID |
+| `GITHUB_APP_INSTALLATION_ID` | App path | — | Numeric installation ID (org-level install) |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | App path | — | Container path to the PEM key (mounted `:ro`) |
+| `GITHUB_TOKEN` | PAT path | — | Classic PAT fallback: `admin:org`, `manage_runners:org`, `read:packages` |
+
+If `GITHUB_TOKEN` is set it is used as-is and the `GITHUB_APP_*` vars are ignored. If it is unset all three `GITHUB_APP_*` vars are required. The controller mints a short-lived installation access token at startup and refreshes it every 55 minutes.
+
+**All other variables:**
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
 | `GITHUB_ORG` | yes | — | GitHub org slug (e.g. `acme`) |
 | `GITHUB_REPO` | no | `infra-runner` | Repo name; used to construct cosign certificate identity |
 | `RUNNER_LABELS` | no | `self-hosted,linux,x64` | Comma-separated runner labels |
@@ -144,13 +158,19 @@ deregisters automatically and exits. No signal trap needed.
 ```
 Startup:
   1. Validate env vars.
-  2. Clean up orphaned resources from any previous controller run (label: runner-managed=true).
-  3. docker pull RUNNER_IMAGE  ← pre-pull so the first spawn doesn't block.
+     Auth path A (preferred): GITHUB_APP_ID + GITHUB_APP_INSTALLATION_ID + GITHUB_APP_PRIVATE_KEY_PATH
+       → source scripts/github-app-token.sh
+       → acquire_github_token(): RS256 JWT → POST /app/installations/{id}/access_tokens → GITHUB_TOKEN
+     Auth path B (fallback): GITHUB_TOKEN set directly → used as-is, App flow skipped
+  2. docker login ghcr.io (using the token from step 1)
+  3. Clean up orphaned resources from any previous controller run (label: runner-managed=true).
+  4. docker pull RUNNER_IMAGE  ← pre-pull so the first spawn doesn't block.
 
 Main loop (every CONTROLLER_POLL_INTERVAL seconds, default 15):
-  4. cleanup_exited_runners()  ← find exited runner containers, tear down job-{id} resources
-  5. count_active_runners()    ← running containers with runner-role=runner label
-  6. spawn (DESIRED_IDLE - active) new runners in background
+  5. maybe_refresh_github_token()  ← no-op on PAT path; refreshes + re-logins at 55 min on App path
+  6. cleanup_exited_runners()  ← find exited runner containers, tear down job-{id} resources
+  7. count_active_runners()    ← running containers with runner-role=runner label
+  8. spawn (DESIRED_IDLE - active) new runners in background
 
 spawn_runner():
   a. uuidgen → job_id (10 lowercase hex chars)
@@ -310,7 +330,9 @@ sudo bash ~/infra-runner/scripts/setup-apparmor.sh
 git clone https://github.com/YOUR_ORG/infra-runner ~/infra-runner
 cd ~/infra-runner
 cp .env.example .env
-$EDITOR .env   # required: GITHUB_TOKEN, GITHUB_ORG, COMPOSE_PROJECT_NAME
+$EDITOR .env   # required: GITHUB_ORG, COMPOSE_PROJECT_NAME
+               # auth (pick one): GITHUB_APP_ID + GITHUB_APP_INSTALLATION_ID + GITHUB_APP_PRIVATE_KEY_PATH
+               #              or: GITHUB_TOKEN (classic PAT, backward compat)
                # recommended: RUNNER_SECCOMP_HOST_PATH
 
 # 5. Start
@@ -394,8 +416,9 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
 
 - **No privileged containers in the job path.** Kaniko builds images in userspace without
   `--privileged`. The DinD host-escape vector is eliminated entirely.
-- **`GITHUB_TOKEN` (PAT) never enters runner containers.** Only the controller holds it.
-  Runners receive only a short-lived registration token that expires after one use.
+- **The controller's GitHub credential never enters runner containers.** The controller
+  holds either a GitHub App installation token (preferred, auto-refreshed every 55 min) or
+  a static PAT. Runners receive only a short-lived registration token that expires after one use.
 - **`--ephemeral` ensures single-use.** Even if a job attempts to persist a backdoor in
   the container filesystem, the container is destroyed before any subsequent job runs.
 - **Docker socket proxies** (`tecnativa/docker-socket-proxy@sha256:1f3a6...`) sit between each service
@@ -433,6 +456,6 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
 - **Health endpoint.** `GET :<HEALTH_PORT>/health` returns `200 {"status":"ok"}` during
   normal operation and `503 {"status":"unhealthy","reason":"..."}` after a signature
   verification failure or compose error. Poll with UptimeRobot, Grafana, etc.
-- **The `.env` file contains a PAT — it is gitignored. Never commit it.**
+- **The `.env` file and any mounted PEM key contain secrets — both are gitignored. Never commit them.**
 - **Remaining open threats:** proxy containers have full socket access (mitigated by being
   minimal and versioned); `$GITHUB_WORKSPACE` disk is unconstrained.

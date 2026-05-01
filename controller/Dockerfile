@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       gnupg \
       lsb-release \
+      openssl \
       uuid-runtime \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
@@ -23,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY scripts/logging.sh /scripts/logging.sh
+COPY scripts/github-app-token.sh /scripts/github-app-token.sh
 COPY controller/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

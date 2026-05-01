@@ -1,7 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-GITHUB_TOKEN="${GITHUB_TOKEN:?GITHUB_TOKEN is required}"
 GITHUB_ORG="${GITHUB_ORG:?GITHUB_ORG is required}"
 RUNNER_IMAGE="${RUNNER_IMAGE:?RUNNER_IMAGE is required}"
 
@@ -17,6 +16,67 @@ CONTROLLER_POLL_INTERVAL="${CONTROLLER_POLL_INTERVAL:-15}"
 LOG_SVC=controller
 # shellcheck source=scripts/logging.sh
 source /scripts/logging.sh
+
+# ---------------------------------------------------------------------------
+# Authentication — GitHub App (preferred) or static PAT (backward compat)
+# ---------------------------------------------------------------------------
+# If GITHUB_TOKEN is already set in the environment, use it as-is and skip
+# the App flow entirely (backward-compatible path).
+# Otherwise the three GITHUB_APP_* vars must be present and the helper script
+# generates a short-lived installation token at startup, refreshed every 55 min.
+
+_USING_GITHUB_APP=false
+TOKEN_ISSUED_AT=0
+
+if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  : # static PAT provided — use as-is
+else
+  _USING_GITHUB_APP=true
+  GITHUB_APP_ID="${GITHUB_APP_ID:?GITHUB_APP_ID is required (or set GITHUB_TOKEN directly)}"
+  GITHUB_APP_INSTALLATION_ID="${GITHUB_APP_INSTALLATION_ID:?GITHUB_APP_INSTALLATION_ID is required}"
+  GITHUB_APP_PRIVATE_KEY_PATH="${GITHUB_APP_PRIVATE_KEY_PATH:?GITHUB_APP_PRIVATE_KEY_PATH is required}"
+  [[ -r "${GITHUB_APP_PRIVATE_KEY_PATH}" ]] \
+    || { printf 'Private key not readable: %s\n' "${GITHUB_APP_PRIVATE_KEY_PATH}" >&2; exit 1; }
+  # shellcheck source=scripts/github-app-token.sh
+  source /scripts/github-app-token.sh
+  GITHUB_TOKEN=""  # populated by acquire_github_token below
+fi
+
+# ---------------------------------------------------------------------------
+# Auth helpers
+# ---------------------------------------------------------------------------
+
+ghcr_login() {
+  printf '%s' "${GITHUB_TOKEN}" \
+    | docker login ghcr.io -u "${GITHUB_ORG}" --password-stdin \
+    || log warn "GHCR login failed — pulls of private images will fail"
+}
+
+acquire_github_token() {
+  local tok
+  tok=$(generate_installation_token) || {
+    log error "Failed to acquire GitHub App installation token"
+    return 1
+  }
+  GITHUB_TOKEN="${tok}"
+  TOKEN_ISSUED_AT=$(date +%s)
+  log info "GitHub App installation token acquired"
+}
+
+# Proactively refresh the installation token at 55 min (before the 1-hour expiry).
+# Each spawn_runner subshell inherits GITHUB_TOKEN at fork time; the 5-minute
+# buffer ensures in-flight spawns finish before the old token expires.
+maybe_refresh_github_token() {
+  [[ "${_USING_GITHUB_APP}" == "true" ]] || return 0
+  local now elapsed
+  now=$(date +%s)
+  elapsed=$(( now - TOKEN_ISSUED_AT ))
+  if (( elapsed >= 3300 )); then
+    log info "GitHub App token nearing expiry; refreshing" elapsed_s "${elapsed}"
+    acquire_github_token
+    ghcr_login
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # Lifecycle helpers
@@ -158,13 +218,13 @@ trap shutdown SIGTERM SIGINT
 
 log info "Controller starting" image "${RUNNER_IMAGE}" desired_idle "${DESIRED_IDLE}"
 
-# Authenticate with GHCR using the PAT already present in the environment.
-# docker pull delegates auth to the calling client (not the daemon), so the
-# CLI inside this container needs its own credentials.
+if [[ "${_USING_GITHUB_APP}" == "true" ]]; then
+  acquire_github_token
+fi
+
 log info "Authenticating with GHCR"
-echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ORG}" --password-stdin \
-  || log warn "GHCR login failed — pulls of private images will fail"
-  
+ghcr_login
+
 log info "Checking for orphaned resources from previous run"
 cleanup_all_managed
 log info "Pre-pulling runner image"
@@ -175,6 +235,8 @@ docker pull "${RUNNER_IMAGE}" > /dev/null
 # ---------------------------------------------------------------------------
 
 while true; do
+  maybe_refresh_github_token
+
   cleanup_exited_runners
 
   active=$(count_active_runners)

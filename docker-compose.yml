@@ -69,6 +69,23 @@ services:
     environment:
       RUNNER_IMAGE: ghcr.io/${GITHUB_ORG}/infra-runner:latest
       DOCKER_HOST: tcp://controller-proxy:2375
+    # ── GitHub App auth (Ansible template reference) ─────────────────────────
+    # When using a GitHub App instead of a static PAT, add these to the
+    # environment block and mount the private key read-only.
+    # Remove GITHUB_TOKEN from .env when using this path.
+    #
+    #   environment:
+    #     GITHUB_APP_ID: "123456"
+    #     GITHUB_APP_INSTALLATION_ID: "78901234"
+    #     GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github_app_key
+    #   volumes:
+    #     - /path/on/host/github-app.pem:/run/secrets/github_app_key:ro
+    #
+    # Required GitHub App permissions:
+    #   Organization → Self-hosted runners: Read & write
+    #   Organization → Members: Read (required alongside runners)
+    #   Packages: Read (to pull runner image from GHCR if private)
+    # ─────────────────────────────────────────────────────────────────────────
     healthcheck:
       test: ["CMD", "docker", "ps", "--filter", "label=runner-managed=true", "-q"]
       interval: 30s
