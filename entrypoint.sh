@@ -19,5 +19,6 @@ REG_TOKEN="${RUNNER_REGISTRATION_TOKEN:?RUNNER_REGISTRATION_TOKEN is required â€
   --unattended \
   --ephemeral
 
-echo "Runner registered (ephemeral). Starting..."
+printf '{"ts":"%s","level":"info","svc":"runner","msg":"Runner registered (ephemeral). Starting."}\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 exec ./run.sh

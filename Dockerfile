@@ -1,6 +1,7 @@
 FROM ubuntu:24.04
 
-ARG RUNNER_VERSION=2.323.0
+ARG RUNNER_VERSION=2.334.0
+ARG RUNNER_SHA256=048024cd2c848eb6f14d5646d56c13a4def2ae7ee3ad12122bee960c56f3d271
 
 # System dependencies + Docker CLI (for `docker login` — no daemon needed for credential storage)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -24,14 +25,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Kaniko executor — builds Docker images from a Dockerfile without a daemon
 # and without a privileged container. Kaniko requires root inside the container
 # but the container itself is unprivileged.
-COPY --from=gcr.io/kaniko-project/executor:latest /kaniko/executor /usr/local/bin/kaniko
+# Version pinned so Dependabot can track updates and builds are reproducible.
+COPY --from=gcr.io/kaniko-project/executor:v1.24.0 /kaniko/executor /usr/local/bin/kaniko
 
 WORKDIR /opt/actions-runner
 
-# Download and extract GitHub Actions runner binary
+# Download, verify SHA256, and extract GitHub Actions runner binary
 RUN curl -fsSL \
       "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz" \
-      | tar -xz
+      -o runner.tar.gz \
+    && echo "${RUNNER_SHA256}  runner.tar.gz" | sha256sum -c - \
+    && tar -xzf runner.tar.gz \
+    && rm runner.tar.gz
 
 # Install runner .NET dependencies
 RUN ./bin/installdependencies.sh

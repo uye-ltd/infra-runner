@@ -1,4 +1,4 @@
-# CLAUDE.md — uye-runner
+# CLAUDE.md — infra-runner
 
 Developer reference for AI assistants working in this repository.
 
@@ -23,7 +23,7 @@ no SSH push from CI is required.
 ├── .env.example                      # template for required env vars (copy → .env)
 ├── .gitignore
 ├── apparmor/
-│   └── uye-runner                    # AppArmor profile applied to every runner container
+│   └── infra-runner                    # AppArmor profile applied to every runner container
 ├── controller/
 │   ├── Dockerfile                    # controller image (Ubuntu 22.04 + docker-ce-cli + jq + uuidgen)
 │   └── entrypoint.sh                 # pool manager: spawn/teardown ephemeral runners
@@ -32,6 +32,7 @@ no SSH push from CI is required.
 │   ├── entrypoint.sh                 # GitOps loop: verify sig → pull → docker compose up -d
 │   └── health_server.py              # minimal Python HTTP server for GET /health
 ├── scripts/
+│   ├── logging.sh                    # shared structured JSON log() function (sourced by controller + deployer)
 │   ├── setup-apparmor.sh             # one-time: install + load AppArmor profile
 │   └── setup-egress-policy.sh        # one-time: configure Docker address pool + iptables egress rules
 ├── seccomp/
@@ -52,7 +53,7 @@ docker-compose (172.20.0.0/24 service space)
 ├── controller-proxy  (tecnativa/docker-socket-proxy — 172.20.0.0/26)
 │   └── /var/run/docker.sock:ro  ← filters API; EXEC + BUILD disabled
 │
-├── controller  (uye-runner-controller — 172.20.0.64/26)
+├── controller  (infra-runner-controller — 172.20.0.64/26)
 │   ├── DOCKER_HOST=tcp://controller-proxy:2375  ← no direct socket mount
 │   └── env: GITHUB_TOKEN, GITHUB_ORG, RUNNER_IMAGE, pool/limit settings
 │
@@ -84,17 +85,18 @@ Loaded from `.env` (via `env_file` in Compose).
 |---|---|---|---|
 | `GITHUB_TOKEN` | yes | — | Classic PAT: `admin:org`, `manage_runners:org`, `read:packages` |
 | `GITHUB_ORG` | yes | — | GitHub org slug (e.g. `acme`) |
-| `GITHUB_REPO` | no | `uye-runner` | Repo name; used to construct cosign certificate identity |
+| `GITHUB_REPO` | no | `infra-runner` | Repo name; used to construct cosign certificate identity |
 | `RUNNER_LABELS` | no | `self-hosted,linux,x64` | Comma-separated runner labels |
 | `DESIRED_IDLE` | no | `2` | Warm idle runners to keep ready at all times |
 | `RUNNER_MEMORY` | no | `4g` | Memory limit per runner container |
 | `RUNNER_CPUS` | no | `2` | CPU limit per runner container |
 | `RUNNER_KANIKO_SIZE` | no | `5g` | tmpfs size for `/kaniko` scratch space inside runner |
-| `RUNNER_APPARMOR_PROFILE` | no | `uye-runner` | AppArmor profile name; empty to disable |
+| `RUNNER_APPARMOR_PROFILE` | no | `infra-runner` | AppArmor profile name; empty to disable |
 | `RUNNER_SECCOMP_HOST_PATH` | no | — | Absolute **host** path to `seccomp/runner-profile.json` |
-| `COMPOSE_PROJECT_NAME` | yes | `uye-runner` | Must match the server directory name |
+| `COMPOSE_PROJECT_NAME` | yes | `infra-runner` | Must match the server directory name |
 | `POLL_INTERVAL` | no | `60` | Deployer digest check interval (seconds) |
 | `HEALTH_PORT` | no | `8080` | Deployer health endpoint port |
+| `CONTROLLER_POLL_INTERVAL` | no | `15` | Controller pool maintenance cycle interval (seconds) |
 
 `RUNNER_IMAGE` and `DOCKER_HOST` are set in the Compose `environment` block (not `.env`)
 and must not be overridden there.
@@ -106,14 +108,16 @@ resolves it there. Leave empty to fall back to Docker's default seccomp profile.
 
 ## Dockerfile details (runner image)
 
-- **Base**: `ubuntu:22.04`
-- **Build arg**: `RUNNER_VERSION` (default `2.323.0`)
+- **Base**: `ubuntu:24.04`
+- **Build args**: `RUNNER_VERSION` (default `2.334.0`) and `RUNNER_SHA256` (SHA256 of the tarball).
+  Both must be updated together when bumping the runner — see *Updating the runner binary* below.
 - **Docker CLI**: `docker-ce-cli` only — no daemon. Used for `docker login` (writes registry
   credentials to `~/.docker/config.json`). `docker build`/`run`/`push` have no daemon to reach.
-- **Kaniko**: `COPY --from=gcr.io/kaniko-project/executor:latest /kaniko/executor /usr/local/bin/kaniko`
-  — statically linked binary. Workflows call `kaniko` instead of `docker build && docker push`.
-- **Runner binary**: downloaded from `github.com/actions/runner/releases`, extracted to
-  `/opt/actions-runner/`
+- **Kaniko**: `COPY --from=gcr.io/kaniko-project/executor:v1.24.0 /kaniko/executor /usr/local/bin/kaniko`
+  — statically linked binary, version-pinned so Dependabot tracks updates. Workflows call
+  `kaniko` instead of `docker build && docker push`.
+- **Runner binary**: downloaded from `github.com/actions/runner/releases`, SHA256-verified
+  before extraction, then extracted to `/opt/actions-runner/`.
 - **User**: root — required by Kaniko to extract image layers and execute `RUN` instructions.
   Container-level controls (seccomp, AppArmor, resource limits, no Docker socket, ephemeral)
   are the security boundary.
@@ -143,7 +147,7 @@ Startup:
   2. Clean up orphaned resources from any previous controller run (label: runner-managed=true).
   3. docker pull RUNNER_IMAGE  ← pre-pull so the first spawn doesn't block.
 
-Main loop (every 15s):
+Main loop (every CONTROLLER_POLL_INTERVAL seconds, default 15):
   4. cleanup_exited_runners()  ← find exited runner containers, tear down job-{id} resources
   5. count_active_runners()    ← running containers with runner-role=runner label
   6. spawn (DESIRED_IDLE - active) new runners in background
@@ -200,17 +204,19 @@ Poll loop (every POLL_INTERVAL seconds):
   3. Runner image:
      verify_image(runner:latest)  ← checks remote registry sig WITHOUT pulling first
      If verified: docker pull runner:latest (quiet)
+       If pull fails: log warn + set_unhealthy; skip set_healthy this cycle
        (controller uses locally cached image on next spawn — never blocked on a pull)
      If NOT verified: set_unhealthy; local cache untouched
 
   4. set_healthy()  ← clears any transient error state from this cycle
+       Skipped if runner image pull failed (preserves unhealthy state)
 
   5. sleep POLL_INTERVAL
 ```
 
 `verify_image()` calls `cosign verify --certificate-identity <workflow-url> --certificate-oidc-issuer <token.actions.githubusercontent.com>`.
-Signature failures are immediately written to `/tmp/health` and logged at `error` level.
-Pull failures are logged as warnings; the loop continues.
+Signature failures are immediately written to `/tmp/health` (atomically via `.tmp` + `mv`) and logged at `error` level.
+Pull failures are logged as warnings and set the health endpoint to unhealthy.
 
 ---
 
@@ -222,12 +228,14 @@ Pull failures are logged as warnings; the loop continues.
 - Allowed API groups: `CONTAINERS`, `NETWORKS`, `IMAGES`, `POST`, `DELETE`, `INFO`
 - Deployer proxy additionally allows: `VOLUMES`
 - Disabled on both: `EXEC=0`, `BUILD=0`, `PLUGINS=0`, `SYSTEM=0`, `SWARM=0`, `SECRETS=0`
+- Resource limits: `memory: 128m`, `cpus: 0.25` — prevents a runaway proxy from affecting the host
 - `restart: unless-stopped`
 
 **controller service**
 - Connects via `DOCKER_HOST=tcp://controller-proxy:2375` — no direct socket mount
 - `depends_on: controller-proxy`
 - `restart: unless-stopped`
+- `healthcheck`: `docker ps --filter label=runner-managed=true` every 30s
 
 **deployer service**
 - Connects via `DOCKER_HOST=tcp://deployer-proxy:2375` — no direct socket mount
@@ -235,6 +243,7 @@ Pull failures are logged as warnings; the loop continues.
 - Exposes `HEALTH_PORT` for the health endpoint
 - `depends_on: deployer-proxy`
 - `restart: unless-stopped`
+- `healthcheck`: `GET /health` every 30s — compose can detect and restart a wedged deployer
 
 **Networks** (all within 172.20.0.0/24, outside the 10.89.0.0/16 runner pool):
 - `controller-proxy-net`: 172.20.0.0/26 — controller-proxy ↔ controller only
@@ -248,16 +257,20 @@ Pull failures are logged as warnings; the loop continues.
 
 ## CI workflow (`.github/workflows/deploy.yml`)
 
-Triggered on push to `main`. Runs on GitHub-hosted runners.
+Triggered on push to `main`. Runs on GitHub-hosted runners. All `uses:` action references
+are pinned to full commit SHAs (not version tags) to prevent supply-chain substitution.
+Dependabot sends update PRs when new versions are released.
 
 ```
-1. Checkout
-2. Install cosign (push events only)
-3. docker/login-action → ghcr.io  (built-in GITHUB_TOKEN, packages: write permission)
-4. build-push runner image     → ghcr.io/{org}/uye-runner:{latest,sha}
-5. build-push controller image → ghcr.io/{org}/uye-runner-controller:{latest,sha}
-6. build-push deployer image   → ghcr.io/{org}/uye-deployer:{latest,sha}
-7. cosign sign (push events only):
+1. actions/checkout@<sha>          (v6.0.2)
+2. sigstore/cosign-installer@<sha> (v4.1.1, push events only)
+3. docker/login-action@<sha>       (v4.1.0, push events only) → ghcr.io
+4. docker/build-push-action@<sha>  (v7.1.0)
+     build-push runner image     (context: .)
+     build-push controller image (context: ., dockerfile: controller/Dockerfile)
+     build-push deployer image   (context: ., dockerfile: deployer/Dockerfile)
+     → each image: ghcr.io/{org}/{name}:{latest,sha}
+5. cosign sign (push events only):
      cosign sign --yes runner@{digest}
      cosign sign --yes controller@{digest}
      cosign sign --yes deployer@{digest}
@@ -266,6 +279,10 @@ Triggered on push to `main`. Runs on GitHub-hosted runners.
 
 On `pull_request` events: images are built but not pushed and not signed (login and
 cosign steps are skipped). Fork PRs cannot push to GHCR.
+
+**Build context**: all three images use `.` (repo root) as the build context. The
+controller and deployer Dockerfiles copy `scripts/logging.sh` from the root before
+copying their own entrypoints.
 
 No SSH secrets are needed. Remove `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`
 from repo secrets if previously set.
@@ -284,14 +301,14 @@ sudo -iu ghrunner
 echo YOUR_PAT | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
 
 # 3. Run one-time setup scripts (as root)
-sudo bash ~/uye-runner/scripts/setup-egress-policy.sh
+sudo bash ~/infra-runner/scripts/setup-egress-policy.sh
 sudo systemctl restart docker   # activates the Docker address pool change
-sudo bash ~/uye-runner/scripts/setup-apparmor.sh
-# Verify: aa-status | grep uye-runner
+sudo bash ~/infra-runner/scripts/setup-apparmor.sh
+# Verify: aa-status | grep infra-runner
 
 # 4. Clone and configure (as ghrunner)
-git clone https://github.com/YOUR_ORG/uye-runner ~/uye-runner
-cd ~/uye-runner
+git clone https://github.com/YOUR_ORG/infra-runner ~/infra-runner
+cd ~/infra-runner
 cp .env.example .env
 $EDITOR .env   # required: GITHUB_TOKEN, GITHUB_ORG, COMPOSE_PROJECT_NAME
                # recommended: RUNNER_SECCOMP_HOST_PATH
@@ -342,14 +359,17 @@ docker compose up -d
 
 ## Updating the runner binary
 
-Bump `ARG RUNNER_VERSION` in `Dockerfile`, push to `main`. CI rebuilds all three images;
-the deployer verifies and applies the update within `POLL_INTERVAL` seconds.
+Bump both `ARG RUNNER_VERSION` and `ARG RUNNER_SHA256` in `Dockerfile`, then push to `main`.
+CI rebuilds all three images; the deployer verifies and applies the update within `POLL_INTERVAL` seconds.
 
 ```dockerfile
-ARG RUNNER_VERSION=2.324.0   # ← bump here
+ARG RUNNER_VERSION=2.335.0   # ← bump here
+ARG RUNNER_SHA256=<sha256>   # ← get from the release page (see below)
 ```
 
-Latest releases: https://github.com/actions/runner/releases
+Find the SHA256 for `actions-runner-linux-x64-<version>.tar.gz` in the release body at
+https://github.com/actions/runner/releases — each release lists checksums inline.
+The build will fail at `sha256sum -c` if the hash does not match, catching supply-chain issues.
 
 ---
 
@@ -385,12 +405,18 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
   versioned, and tracked by Dependabot.
 - **Seccomp** blocks kernel-level syscalls (`mount`, `kexec_*`, `bpf`, kernel modules)
   that are the basis of most container escape techniques.
-- **AppArmor profile** (`apparmor/uye-runner`) is applied to every runner container via
-  `--security-opt apparmor=uye-runner`. It denies dangerous capabilities (`sys_module`,
+- **AppArmor profile** (`apparmor/infra-runner`) is applied to every runner container via
+  `--security-opt apparmor=infra-runner`. It denies dangerous capabilities (`sys_module`,
   `sys_admin`, `net_raw`), raw/packet sockets, writes to kernel tunables and sysfs, and
   access to host credential files. Load with `scripts/setup-apparmor.sh` before first start.
   Set `RUNNER_APPARMOR_PROFILE=` (empty) in `.env` to disable.
-- **Resource limits** prevent crypto mining or denial-of-service against the host.
+- **Runner binary SHA256 is verified at build time.** `ARG RUNNER_SHA256` is checked with
+  `sha256sum -c` before extraction. A mismatch fails the Docker build immediately.
+- **GitHub Actions in CI are SHA-pinned.** All `uses:` references in `deploy.yml` are pinned
+  to full commit SHAs so a retag cannot silently change the code that builds or signs images.
+  Dependabot tracks version bumps and sends PRs.
+- **Resource limits** prevent crypto mining or denial-of-service against the host. Socket proxy
+  containers are additionally limited to `memory: 128m` / `cpus: 0.25`.
 - **Network egress is restricted.** `scripts/setup-egress-policy.sh` allocates job networks
   from `10.89.0.0/16` and adds iptables `DOCKER-USER` rules allowing only DNS (53) and
   HTTPS (443) from that subnet. Private RFC 1918 ranges are explicitly blocked.

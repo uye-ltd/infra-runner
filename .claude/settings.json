@@ -1,0 +1,35 @@
+{
+  "agent": "language-router",
+  "outputStyle": "Explanatory",
+  "lang": null,
+  "pipeline": {
+    "skipReview": false,
+    "skipPlanner": false,
+    "autoPerformance": false,
+    "maxIterations": 3,
+    "maxDebugCycles": 2,
+    "disableAgents": []
+  },
+  "context": {
+    "maxFiles": 20
+  },
+  "tools": [
+    "crowdsec",
+    "docker",
+    "docker-buildx",
+    "docker-compose",
+    "github-actions",
+    "helm",
+    "kubernetes",
+    "terraform",
+    "vault",
+    "wireguard"
+  ],
+  "skills": {
+    "exclude": [],
+    "include": []
+  },
+  "enabledPlugins": {
+    "uye@uye": true
+  }
+}

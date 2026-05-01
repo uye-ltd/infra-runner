@@ -15,8 +15,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  RUNNER_IMAGE:     ghcr.io/${{ github.repository_owner }}/uye-runner
-  CONTROLLER_IMAGE: ghcr.io/${{ github.repository_owner }}/uye-runner-controller
+  RUNNER_IMAGE:     ghcr.io/${{ github.repository_owner }}/infra-runner
+  CONTROLLER_IMAGE: ghcr.io/${{ github.repository_owner }}/infra-runner-controller
   DEPLOYER_IMAGE:   ghcr.io/${{ github.repository_owner }}/uye-deployer
 
 jobs:
@@ -30,16 +30,16 @@ jobs:
       id-token: write  # required for keyless cosign signing via OIDC
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Install cosign
         if: github.event_name == 'push'
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003  # v4.1.1
 
       - name: Log in to GHCR
         # Skip login on fork PRs — they have no secret access
         if: github.event_name == 'push'
-        uses: docker/login-action@v4
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -47,7 +47,7 @@ jobs:
 
       - name: Build and push runner image
         id: build-runner
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
         with:
           context: .
           push: ${{ github.event_name == 'push' }}
@@ -57,9 +57,10 @@ jobs:
 
       - name: Build and push controller image
         id: build-controller
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
         with:
-          context: ./controller
+          context: .
+          dockerfile: controller/Dockerfile
           push: ${{ github.event_name == 'push' }}
           tags: |
             ${{ env.CONTROLLER_IMAGE }}:latest
@@ -67,9 +68,10 @@ jobs:
 
       - name: Build and push deployer image
         id: build-deployer
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
         with:
-          context: ./deployer
+          context: .
+          dockerfile: deployer/Dockerfile
           push: ${{ github.event_name == 'push' }}
           tags: |
             ${{ env.DEPLOYER_IMAGE }}:latest

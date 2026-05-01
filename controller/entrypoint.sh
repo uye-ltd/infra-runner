@@ -4,32 +4,19 @@ set -euo pipefail
 GITHUB_TOKEN="${GITHUB_TOKEN:?GITHUB_TOKEN is required}"
 GITHUB_ORG="${GITHUB_ORG:?GITHUB_ORG is required}"
 RUNNER_IMAGE="${RUNNER_IMAGE:?RUNNER_IMAGE is required}"
+
 RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,linux,x64}"
 DESIRED_IDLE="${DESIRED_IDLE:-2}"
 RUNNER_MEMORY="${RUNNER_MEMORY:-4g}"
 RUNNER_CPUS="${RUNNER_CPUS:-2}"
 RUNNER_KANIKO_SIZE="${RUNNER_KANIKO_SIZE:-5g}"
-RUNNER_APPARMOR_PROFILE="${RUNNER_APPARMOR_PROFILE:-uye-runner}"
+RUNNER_APPARMOR_PROFILE="${RUNNER_APPARMOR_PROFILE:-infra-runner}"
 RUNNER_SECCOMP_HOST_PATH="${RUNNER_SECCOMP_HOST_PATH:-}"
+CONTROLLER_POLL_INTERVAL="${CONTROLLER_POLL_INTERVAL:-15}"
 
-# ---------------------------------------------------------------------------
-# Structured JSON logging
-# Usage: log <level> <message> [key value ...]
-# ---------------------------------------------------------------------------
-
-log() {
-  local level="$1" msg="$2"; shift 2
-  # Escape message for JSON
-  msg="${msg//\\/\\\\}"; msg="${msg//\"/\\\"}"; msg="${msg//$'\n'/\\n}"
-  local kv=""
-  while [[ $# -ge 2 ]]; do
-    local k="$1" v="$2"; shift 2
-    v="${v//\\/\\\\}"; v="${v//\"/\\\"}"; v="${v//$'\n'/\\n}"
-    kv="${kv},\"${k}\":\"${v}\""
-  done
-  printf '{"ts":"%s","level":"%s","svc":"controller","msg":"%s"%s}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${level}" "${msg}" "${kv}"
-}
+LOG_SVC=controller
+# shellcheck source=scripts/logging.sh
+source /scripts/logging.sh
 
 # ---------------------------------------------------------------------------
 # Lifecycle helpers
@@ -177,7 +164,7 @@ log info "Controller starting" image "${RUNNER_IMAGE}" desired_idle "${DESIRED_I
 log info "Authenticating with GHCR"
 echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ORG}" --password-stdin \
   || log warn "GHCR login failed — pulls of private images will fail"
-
+  
 log info "Checking for orphaned resources from previous run"
 cleanup_all_managed
 log info "Pre-pulling runner image"
@@ -201,5 +188,5 @@ while true; do
     wait
   fi
 
-  sleep 15
+  sleep "${CONTROLLER_POLL_INTERVAL}"
 done

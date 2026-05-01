@@ -23,6 +23,11 @@ services:
       DELETE:     1   # allow delete operations
       INFO:       1   # docker info (used by compose internals)
       # All others (EXEC, BUILD, PLUGINS, SYSTEM, SWARM, SECRETS) default to 0
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: "0.25"
     networks:
       - controller-proxy-net
 
@@ -40,6 +45,11 @@ services:
       DELETE:     1
       INFO:       1
       # EXEC, BUILD, PLUGINS, SYSTEM, SWARM, SECRETS default to 0
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: "0.25"
     networks:
       - deployer-proxy-net
 
@@ -48,16 +58,23 @@ services:
   # ---------------------------------------------------------------------------
 
   controller:
-    image: ghcr.io/${GITHUB_ORG}/uye-runner-controller:latest
+    image: ghcr.io/${GITHUB_ORG}/infra-runner-controller:latest
     build:
-      context: ./controller
+      context: .
+      dockerfile: controller/Dockerfile
     restart: unless-stopped
     depends_on:
       - controller-proxy
     env_file: .env
     environment:
-      RUNNER_IMAGE: ghcr.io/${GITHUB_ORG}/uye-runner:latest
+      RUNNER_IMAGE: ghcr.io/${GITHUB_ORG}/infra-runner:latest
       DOCKER_HOST: tcp://controller-proxy:2375
+    healthcheck:
+      test: ["CMD", "docker", "ps", "--filter", "label=runner-managed=true", "-q"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     networks:
       - controller-proxy-net
       - controller-net
@@ -69,19 +86,26 @@ services:
   deployer:
     image: ghcr.io/${GITHUB_ORG}/uye-deployer:latest
     build:
-      context: ./deployer
+      context: .
+      dockerfile: deployer/Dockerfile
     restart: unless-stopped
     depends_on:
       - deployer-proxy
     env_file: .env
     environment:
-      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-uye-runner}
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-infra-runner}
       HEALTH_PORT: ${HEALTH_PORT:-8080}
       DOCKER_HOST: tcp://deployer-proxy:2375
     ports:
       - "${HEALTH_PORT:-8080}:${HEALTH_PORT:-8080}"
     volumes:
       - ./:/workspace:ro   # deployer reads compose file + .env to apply updates
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:${HEALTH_PORT:-8080}/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     networks:
       - deployer-proxy-net
       - deployer-net

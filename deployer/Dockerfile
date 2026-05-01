@@ -23,12 +23,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # cosign — verifies image signatures before the deployer applies any update.
 # Keyless verification: no private key stored here; trust is anchored to the
 # GitHub Actions OIDC identity that signed the image in CI.
-# Copied from the official image (same pattern as Kaniko in the runner Dockerfile)
-# so Dependabot can track the version via this FROM reference.
-COPY --from=gcr.io/projectsigstore/cosign:v2.4.1 /ko-app/cosign /usr/local/bin/cosign
+# Pinned by both version tag and digest so a force-pushed tag cannot substitute a different binary.
+COPY --from=gcr.io/projectsigstore/cosign:v2.4.1@sha256:b03690aa52bfe94054187142fba24dc54137650682810633901767d8a3e15b31 /ko-app/cosign /usr/local/bin/cosign
 
-COPY entrypoint.sh /entrypoint.sh
-COPY health_server.py /health_server.py
+COPY scripts/logging.sh /scripts/logging.sh
+COPY deployer/entrypoint.sh /entrypoint.sh
+COPY deployer/health_server.py /health_server.py
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]

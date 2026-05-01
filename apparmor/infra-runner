@@ -1,6 +1,6 @@
 #include <tunables/global>
 
-# AppArmor profile for uye-runner ephemeral job containers.
+# AppArmor profile for infra-runner ephemeral job containers.
 #
 # Strategy: deny-by-exception. Broad filesystem access is granted so arbitrary
 # CI workflow steps can function, but targeted denials cover host-impacting
@@ -8,9 +8,9 @@
 # AppArmor deny rules take precedence over allow rules regardless of order.
 #
 # Load with: scripts/setup-apparmor.sh
-# Applied by the controller via: --security-opt apparmor=uye-runner
+# Applied by the controller via: --security-opt apparmor=infra-runner
 
-profile uye-runner flags=(attach_disconnected,mediate_deleted) {
+profile infra-runner flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/base>
   #include <abstractions/nameservice>
 

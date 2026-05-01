@@ -1,4 +1,4 @@
-# uye-runner
+# infra-runner
 
 Hardened self-hosted GitHub Actions runner for public repositories. Each job runs in a fresh, isolated container that is destroyed on completion. A GitOps deployer polls GHCR for new images, verifies their cosign signatures, and applies updates without SSH.
 
@@ -33,8 +33,8 @@ Per job (created and destroyed by the controller):
 | Privileged container escape | No privileged flag — Kaniko builds in userspace, no DinD |
 | PAT theft | `GITHUB_TOKEN` stays in the controller; runners get only a short-lived registration token |
 | Docker socket abuse | Socket proxy allows only required API endpoints; `EXEC` and `BUILD` disabled on both proxies |
-| Supply chain / image tampering | cosign keyless signing in CI; deployer verifies signature before every pull |
-| Resource abuse (mining, DoS) | `--memory` and `--cpus` limits on every runner container |
+| Supply chain / image tampering | cosign keyless signing in CI; deployer verifies signature before every pull; runner binary SHA256-verified at build time; CI actions pinned to commit SHAs |
+| Resource abuse (mining, DoS) | `--memory` and `--cpus` limits on every runner container; socket proxies capped at 128 MB / 0.25 CPU |
 | Network exfiltration / lateral movement | Egress policy: DNS + HTTPS only; private RFC 1918 ranges blocked |
 | Kernel-level container escape | `seccomp/runner-profile.json` blocks `mount`, `kexec_*`, `bpf`, kernel module syscalls |
 | File system / capability abuse | AppArmor profile denies `sys_admin`, `sys_module`, `net_raw`, sysfs writes, host credential reads |
@@ -58,19 +58,19 @@ Run as root before starting the stack for the first time.
 ```bash
 # Network egress policy — restricts runner containers to DNS + HTTPS only,
 # blocks private networks, configures Docker address pool for job networks
-sudo bash ~/uye-runner/scripts/setup-egress-policy.sh
+sudo bash ~/infra-runner/scripts/setup-egress-policy.sh
 sudo systemctl restart docker   # required for address pool change to take effect
 
 # AppArmor profile — MAC layer restricting runner capabilities and file access
-sudo bash ~/uye-runner/scripts/setup-apparmor.sh
-# Verify: aa-status | grep uye-runner
+sudo bash ~/infra-runner/scripts/setup-apparmor.sh
+# Verify: aa-status | grep infra-runner
 ```
 
 The egress script allocates job networks from `10.89.0.0/16` and adds iptables
 `DOCKER-USER` rules restricting that subnet to DNS and HTTPS only.
 
-The AppArmor script installs `apparmor/uye-runner` and loads it. The controller passes
-`--security-opt apparmor=uye-runner` to every runner container.
+The AppArmor script installs `apparmor/infra-runner` and loads it. The controller passes
+`--security-opt apparmor=infra-runner` to every runner container.
 
 The controller and deployer services each have their own isolated network in
 `172.20.0.0/24` and are not subject to the runner egress rules.
@@ -89,8 +89,8 @@ sudo -iu ghrunner
 echo YOUR_PAT | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
 
 # 3. Clone and configure
-git clone https://github.com/YOUR_ORG/uye-runner ~/uye-runner
-cd ~/uye-runner
+git clone https://github.com/YOUR_ORG/infra-runner ~/infra-runner
+cd ~/infra-runner
 cp .env.example .env
 $EDITOR .env   # required: GITHUB_TOKEN, GITHUB_ORG, COMPOSE_PROJECT_NAME
                # recommended: RUNNER_SECCOMP_HOST_PATH
@@ -124,17 +124,18 @@ Copy `.env.example` to `.env`:
 |---|---|---|---|
 | `GITHUB_TOKEN` | yes | — | Classic PAT: `admin:org`, `manage_runners:org`, `read:packages` |
 | `GITHUB_ORG` | yes | — | GitHub org slug (e.g. `acme`) |
-| `GITHUB_REPO` | no | `uye-runner` | Repo name; used to construct the cosign certificate identity |
+| `GITHUB_REPO` | no | `infra-runner` | Repo name; used to construct the cosign certificate identity |
 | `RUNNER_LABELS` | no | `self-hosted,linux,x64` | Comma-separated runner labels |
 | `DESIRED_IDLE` | no | `2` | Warm idle runners to keep ready |
 | `RUNNER_MEMORY` | no | `4g` | Memory limit per runner container |
 | `RUNNER_CPUS` | no | `2` | CPU limit per runner container |
 | `RUNNER_KANIKO_SIZE` | no | `5g` | tmpfs size for Kaniko scratch space inside runner |
-| `RUNNER_APPARMOR_PROFILE` | no | `uye-runner` | AppArmor profile name; empty to disable |
+| `RUNNER_APPARMOR_PROFILE` | no | `infra-runner` | AppArmor profile name; empty to disable |
 | `RUNNER_SECCOMP_HOST_PATH` | no | — | Absolute host path to `seccomp/runner-profile.json` |
-| `COMPOSE_PROJECT_NAME` | yes | `uye-runner` | Must match the directory name on the server |
+| `COMPOSE_PROJECT_NAME` | yes | `infra-runner` | Must match the directory name on the server |
 | `POLL_INTERVAL` | no | `60` | Seconds between GHCR digest checks |
 | `HEALTH_PORT` | no | `8080` | Port for the deployer health endpoint |
+| `CONTROLLER_POLL_INTERVAL` | no | `15` | Seconds between controller pool maintenance cycles |
 
 ---
 
@@ -271,14 +272,16 @@ docker compose up -d
 
 ## Updating the runner binary
 
-Bump `RUNNER_VERSION` in `Dockerfile` and push to `main`. CI rebuilds all three images,
-signs them, and the deployer verifies and applies the update.
+Bump **both** `RUNNER_VERSION` and `RUNNER_SHA256` in `Dockerfile` and push to `main`.
+CI rebuilds all three images, signs them, and the deployer verifies and applies the update.
 
 ```dockerfile
-ARG RUNNER_VERSION=2.324.0   # ← bump here
+ARG RUNNER_VERSION=2.335.0   # ← bump here
+ARG RUNNER_SHA256=<sha256>   # ← find in the release notes at github.com/actions/runner/releases
 ```
 
-Latest releases: https://github.com/actions/runner/releases
+The SHA256 for `actions-runner-linux-x64-<version>.tar.gz` is listed inline in each GitHub
+release. The build fails at verification if the hash does not match.
 
 ---
 

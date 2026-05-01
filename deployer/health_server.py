@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Minimal health endpoint for the uye-runner deployer.
+Minimal health endpoint for the infra-runner deployer.
 
 GET /health  →  200 {"status":"ok",...}   or  503 {"status":"unhealthy",...}
 
@@ -30,8 +30,8 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
         except FileNotFoundError:
             # Deployer is still starting up
             state = {"status": "starting"}
-        except Exception as e:
-            state = {"status": "unknown", "reason": str(e)}
+        except Exception:
+            state = {"status": "unknown"}
 
         code = 200 if state.get("status") == "ok" else 503
         self._send(code, state)
@@ -50,6 +50,8 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     server = http.server.HTTPServer((HOST, PORT), HealthHandler)
-    print(f'{{"ts":null,"level":"info","svc":"deployer","msg":"Health server listening","port":{PORT}}}',
-          flush=True)
+    print(
+        f'{{"ts":null,"level":"info","svc":"deployer","msg":"Health server listening","port":{PORT}}}',
+        flush=True,
+    )
     server.serve_forever()

@@ -7,12 +7,12 @@
 # restricts capabilities, network socket types, and access to sensitive host
 # paths while allowing the broad filesystem access CI workflows require.
 #
-# The controller passes --security-opt apparmor=uye-runner to every spawned
+# The controller passes --security-opt apparmor=infra-runner to every spawned
 # runner container. Set RUNNER_APPARMOR_PROFILE= (empty) in .env to disable.
 set -euo pipefail
 
-PROFILE_SRC="$(cd "$(dirname "$0")/.." && pwd)/apparmor/uye-runner"
-PROFILE_DST="/etc/apparmor.d/uye-runner"
+PROFILE_SRC="$(cd "$(dirname "$0")/.." && pwd)/apparmor/infra-runner"
+PROFILE_DST="/etc/apparmor.d/infra-runner"
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "ERROR: must run as root" >&2
@@ -31,5 +31,5 @@ echo "Loading profile..."
 apparmor_parser -r -W "${PROFILE_DST}"
 
 echo
-echo "Profile loaded: uye-runner"
-echo "Verify with: aa-status | grep uye-runner"
+echo "Profile loaded: infra-runner"
+echo "Verify with: aa-status | grep infra-runner"
