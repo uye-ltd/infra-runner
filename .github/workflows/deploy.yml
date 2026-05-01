@@ -60,7 +60,7 @@ jobs:
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
         with:
           context: .
-          dockerfile: controller/Dockerfile
+          file: controller/Dockerfile
           push: ${{ github.event_name == 'push' }}
           tags: |
             ${{ env.CONTROLLER_IMAGE }}:latest
@@ -71,7 +71,7 @@ jobs:
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
         with:
           context: .
-          dockerfile: deployer/Dockerfile
+          file: deployer/Dockerfile
           push: ${{ github.event_name == 'push' }}
           tags: |
             ${{ env.DEPLOYER_IMAGE }}:latest
