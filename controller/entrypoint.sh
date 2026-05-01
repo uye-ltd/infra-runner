@@ -228,7 +228,9 @@ ghcr_login
 log info "Checking for orphaned resources from previous run"
 cleanup_all_managed
 log info "Pre-pulling runner image"
-docker pull "${RUNNER_IMAGE}" > /dev/null
+docker pull "${RUNNER_IMAGE}" > /dev/null \
+  || log warn "Runner image pre-pull failed — will retry on next cycle" \
+       image "${RUNNER_IMAGE}"
 
 # ---------------------------------------------------------------------------
 # Main loop
