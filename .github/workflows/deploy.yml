@@ -35,6 +35,8 @@ jobs:
       - name: Install cosign
         if: github.event_name == 'push'
         uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003  # v4.1.1
+        with:
+          cosign-release: 'v2.2.4'
 
       - name: Log in to GHCR
         # Skip login on fork PRs — they have no secret access
