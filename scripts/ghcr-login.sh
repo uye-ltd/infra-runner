@@ -29,7 +29,10 @@ if [[ -n "${GITHUB_TOKEN:-}" ]]; then
 else
   GITHUB_APP_ID="${GITHUB_APP_ID:?GITHUB_APP_ID is required (or set GITHUB_TOKEN directly)}"
   GITHUB_APP_INSTALLATION_ID="${GITHUB_APP_INSTALLATION_ID:?GITHUB_APP_INSTALLATION_ID is required}"
-  GITHUB_APP_PRIVATE_KEY_PATH="${GITHUB_APP_PRIVATE_KEY_PATH:?GITHUB_APP_PRIVATE_KEY_PATH is required}"
+  # Prefer the host path when running outside a container (e.g. manual ghcr-login.sh).
+  # GITHUB_APP_PRIVATE_KEY_PATH points to the in-container mount (/run/secrets/...),
+  # which does not exist on the host.
+  GITHUB_APP_PRIVATE_KEY_PATH="${GITHUB_APP_PRIVATE_KEY_HOST_PATH:-${GITHUB_APP_PRIVATE_KEY_PATH:?GITHUB_APP_PRIVATE_KEY_PATH is required}}"
   [[ -r "${GITHUB_APP_PRIVATE_KEY_PATH}" ]] \
     || { log error "Private key not readable" path="${GITHUB_APP_PRIVATE_KEY_PATH}"; exit 1; }
 
