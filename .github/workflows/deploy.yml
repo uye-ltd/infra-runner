@@ -84,8 +84,14 @@ jobs:
         if: github.event_name == 'push'
         run: |
           cosign sign --yes \
+            --registry-username "${{ github.actor }}" \
+            --registry-password "${{ secrets.GITHUB_TOKEN }}" \
             ${{ env.RUNNER_IMAGE }}@${{ steps.build-runner.outputs.digest }}
           cosign sign --yes \
+            --registry-username "${{ github.actor }}" \
+            --registry-password "${{ secrets.GITHUB_TOKEN }}" \
             ${{ env.CONTROLLER_IMAGE }}@${{ steps.build-controller.outputs.digest }}
           cosign sign --yes \
+            --registry-username "${{ github.actor }}" \
+            --registry-password "${{ secrets.GITHUB_TOKEN }}" \
             ${{ env.DEPLOYER_IMAGE }}@${{ steps.build-deployer.outputs.digest }}
