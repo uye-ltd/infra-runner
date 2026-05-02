@@ -48,10 +48,14 @@ Per job (created and destroyed by the controller):
 - The GitHub org slug you want to attach runners to
 - **One** of the following for authentication (used by both controller and deployer):
   - **GitHub App** (recommended) — a GitHub App installed on the org with
-    *Self-hosted runners: Read & write*, *Members: Read*, and *Packages: Read* permissions.
+    *Self-hosted runners: Read & write* and *Members: Read* permissions.
     You will need the App ID, installation ID, and a downloaded private key PEM file.
   - **Classic PAT** (backward compat) — `admin:org`, `manage_runners:org`, `read:packages` scopes.
     Fine-grained tokens do not support `manage_runners:org`.
+- **GHCR packages must be public** when using a GitHub App. App installation tokens cannot
+  authenticate to GHCR regardless of the `Packages: Read` permission — this is a GitHub
+  limitation. The controller and deployer pull images anonymously. To keep packages private,
+  use a classic PAT with `read:packages` instead.
 
 ---
 
@@ -88,11 +92,8 @@ The controller and deployer services each have their own isolated network in
 sudo useradd -m -s /bin/bash ghrunner
 sudo usermod -aG docker ghrunner
 
-# 2. Authenticate with GHCR (as ghrunner)
+# 2. Clone and configure (as ghrunner)
 sudo -iu ghrunner
-echo YOUR_PAT_OR_APP_TOKEN | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
-
-# 3. Clone and configure
 git clone https://github.com/YOUR_ORG/infra-runner ~/infra-runner
 cd ~/infra-runner
 cp .env.example .env
@@ -101,15 +102,12 @@ $EDITOR .env   # required: GITHUB_ORG, COMPOSE_PROJECT_NAME
                #   GitHub App (recommended): GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID,
                #                             GITHUB_APP_PRIVATE_KEY_PATH
                #   Static PAT (fallback):    GITHUB_TOKEN
-               # recommended: RUNNER_SECCOMP_HOST_PATH
 
-# 4. Pull and start (pulls all four services from GHCR)
-# If more than 1 hour has passed since the last login, refresh credentials first:
-scripts/ghcr-login.sh
+# 3. Pull and start (packages must be public for GitHub App auth)
 docker compose pull
 docker compose up -d
 
-# 5. Verify
+# 4. Verify
 docker compose logs -f controller | jq .
 # → {"level":"info","svc":"controller","msg":"Runner is live","job_id":"..."}
 ```
@@ -137,7 +135,6 @@ Copy `.env.example` to `.env`. Exactly one auth path must be configured:
 | `GITHUB_APP_ID` | yes (App) | Numeric GitHub App ID |
 | `GITHUB_APP_INSTALLATION_ID` | yes (App) | Numeric org installation ID |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | yes (App) | Container path to the PEM key (mounted `:ro`) |
-| `GITHUB_APP_PRIVATE_KEY_HOST_PATH` | App + `ghcr-login.sh` | Host filesystem path to the PEM key — used by `scripts/ghcr-login.sh`, which runs on the host where the container mount path does not exist |
 
 **Static PAT (backward compat)** — set `GITHUB_TOKEN` and leave the App vars unset.
 
@@ -153,7 +150,7 @@ Copy `.env.example` to `.env`. Exactly one auth path must be configured:
 | `RUNNER_CPUS` | no | `2` | CPU limit per runner container |
 | `RUNNER_KANIKO_SIZE` | no | `5g` | tmpfs size for Kaniko scratch space inside runner |
 | `RUNNER_APPARMOR_PROFILE` | no | `infra-runner` | AppArmor profile name; empty to disable |
-| `RUNNER_SECCOMP_HOST_PATH` | no | — | Absolute host path to `seccomp/runner-profile.json` |
+| `RUNNER_SECCOMP_HOST_PATH` | no | — | Path to `seccomp/runner-profile.json` as seen from inside the controller container (mounted in via `docker-compose.yml`) |
 | `COMPOSE_PROJECT_NAME` | yes | `infra-runner` | Must match the directory name on the server |
 | `POLL_INTERVAL` | no | `60` | Seconds between GHCR digest checks |
 | `HEALTH_PORT` | no | `8080` | Port for the deployer health endpoint |
@@ -288,10 +285,6 @@ docker compose down
 # Local build after code changes
 docker compose build
 docker compose up -d
-
-# Refresh GHCR credentials (GitHub App tokens expire after 1 hour)
-# Run this before `docker compose pull` if login fails with "denied"
-scripts/ghcr-login.sh
 ```
 
 ---
@@ -326,7 +319,9 @@ and the deployer, and scoped to a single installation — no manual rotation req
 2. Grant these **organization** permissions:
    - *Self-hosted runners*: Read & write
    - *Members*: Read
-   - *Packages*: Read (if your runner image is in a private GHCR package)
+
+   > Do not add *Packages: Read* — App installation tokens cannot access GHCR regardless.
+   > Keep GHCR packages public when using this path.
 3. Install the App on the org and note the **installation ID** (visible in the URL of the
    install page: `github.com/organizations/YOUR_ORG/settings/installations/<id>`).
 4. Generate a private key (PEM) from the App settings page and store it on the server.
