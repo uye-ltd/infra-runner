@@ -104,6 +104,8 @@ $EDITOR .env   # required: GITHUB_ORG, COMPOSE_PROJECT_NAME
                # recommended: RUNNER_SECCOMP_HOST_PATH
 
 # 4. Pull and start (pulls all four services from GHCR)
+# If more than 1 hour has passed since the last login, refresh credentials first:
+scripts/ghcr-login.sh
 docker compose pull
 docker compose up -d
 
@@ -285,6 +287,10 @@ docker compose down
 # Local build after code changes
 docker compose build
 docker compose up -d
+
+# Refresh GHCR credentials (GitHub App tokens expire after 1 hour)
+# Run this before `docker compose pull` if login fails with "denied"
+scripts/ghcr-login.sh
 ```
 
 ---
