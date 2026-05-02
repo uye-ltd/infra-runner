@@ -137,6 +137,7 @@ Copy `.env.example` to `.env`. Exactly one auth path must be configured:
 | `GITHUB_APP_ID` | yes (App) | Numeric GitHub App ID |
 | `GITHUB_APP_INSTALLATION_ID` | yes (App) | Numeric org installation ID |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | yes (App) | Container path to the PEM key (mounted `:ro`) |
+| `GITHUB_APP_PRIVATE_KEY_HOST_PATH` | App + `ghcr-login.sh` | Host filesystem path to the PEM key — used by `scripts/ghcr-login.sh`, which runs on the host where the container mount path does not exist |
 
 **Static PAT (backward compat)** — set `GITHUB_TOKEN` and leave the App vars unset.
 
@@ -316,6 +317,10 @@ release. The build fails at verification if the hash does not match.
 
 GitHub App installation tokens are short-lived (1 hour), auto-refreshed by both the controller
 and the deployer, and scoped to a single installation — no manual rotation required.
+
+> **GHCR access:** GitHub App installation tokens cannot authenticate to GHCR regardless of
+> the App's *Packages: Read* permission. With the App path, **runner images must be public**.
+> If your images are private, use Option B (classic PAT) instead.
 
 1. Create a GitHub App in your org (**Settings → Developer settings → GitHub Apps → New GitHub App**).
 2. Grant these **organization** permissions:

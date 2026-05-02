@@ -32,6 +32,7 @@ no SSH push from CI is required.
 │   ├── entrypoint.sh                 # GitOps loop: verify sig → pull → docker compose up -d
 │   └── health_server.py              # minimal Python HTTP server for GET /health
 ├── scripts/
+│   ├── ghcr-login.sh                 # refresh GHCR credentials on the host (sources github-app-token.sh; run before docker compose pull)
 │   ├── github-app-token.sh           # GitHub App JWT helper (sourced by controller + deployer): RS256 JWT → installation token
 │   ├── logging.sh                    # shared structured JSON log() function (sourced by controller + deployer)
 │   ├── setup-apparmor.sh             # one-time: install + load AppArmor profile
@@ -90,6 +91,7 @@ Loaded from `.env` (via `env_file` in Compose).
 | `GITHUB_APP_ID` | App path | — | Numeric GitHub App ID |
 | `GITHUB_APP_INSTALLATION_ID` | App path | — | Numeric installation ID (org-level install) |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | App path | — | Container path to the PEM key (mounted `:ro`) |
+| `GITHUB_APP_PRIVATE_KEY_HOST_PATH` | App path | — | Host filesystem path to the PEM key — used by `scripts/ghcr-login.sh` when run outside a container (the container mount path does not exist on the host) |
 | `GITHUB_TOKEN` | PAT path | — | Classic PAT fallback: `admin:org`, `manage_runners:org`, `read:packages` |
 
 If `GITHUB_TOKEN` is set it is used as-is and the `GITHUB_APP_*` vars are ignored. If it is unset all three `GITHUB_APP_*` vars are required. The controller mints a short-lived installation access token at startup and refreshes it every 55 minutes.
@@ -162,12 +164,15 @@ Startup:
        → source scripts/github-app-token.sh
        → acquire_github_token(): RS256 JWT → POST /app/installations/{id}/access_tokens → GITHUB_TOKEN
      Auth path B (fallback): GITHUB_TOKEN set directly → used as-is, App flow skipped
-  2. docker login ghcr.io (using the token from step 1)
+  2. GHCR login (PAT path only):
+       Write {"auths":{"ghcr.io":{"auth":"<base64>"}}} directly to /root/.docker/config.json
+       App path: skipped — App installation tokens cannot access GHCR; packages must be public
   3. Clean up orphaned resources from any previous controller run (label: runner-managed=true).
   4. docker pull RUNNER_IMAGE  ← pre-pull so the first spawn doesn't block.
 
 Main loop (every CONTROLLER_POLL_INTERVAL seconds, default 15):
-  5. maybe_refresh_github_token()  ← no-op on PAT path; refreshes + re-logins at 55 min on App path
+  5. maybe_refresh_github_token()  ← no-op on PAT path; refreshes token at 55 min on App path
+                                      (no GHCR re-login on refresh — App path never logs in to GHCR)
   6. cleanup_exited_runners()  ← find exited runner containers, tear down job-{id} resources
   7. count_active_runners()    ← running containers with runner-role=runner label
   8. spawn (DESIRED_IDLE - active) new runners in background
@@ -203,14 +208,17 @@ Startup:
     → source scripts/github-app-token.sh
     → acquire_github_token(): RS256 JWT → POST /app/installations/{id}/access_tokens → GITHUB_TOKEN
   Auth path B (fallback): GITHUB_TOKEN set directly → used as-is, App flow skipped
-  docker login ghcr.io (using the token from above)
+  GHCR login (PAT path only):
+    Write {"auths":{"ghcr.io":{"auth":"<base64>"}}} directly to /root/.docker/config.json
+    App path: skipped — App installation tokens cannot access GHCR; packages must be public
   1. Start health_server.py in background (serves GET /health from /tmp/health)
   2. set_healthy()  ← write {"status":"ok"} to /tmp/health
   3. Log startup info (JSON)
 
 Poll loop (every POLL_INTERVAL seconds):
 
-  0. maybe_refresh_github_token()  ← no-op on PAT path; refreshes + re-logins at 55 min on App path
+  0. maybe_refresh_github_token()  ← no-op on PAT path; refreshes token at 55 min on App path
+                                      (no GHCR re-login — App path never authenticates to GHCR)
 
   1. Self-update:
      pull_if_new(deployer:latest)  ← compare local digest before/after pull
@@ -262,6 +270,8 @@ Pull failures are logged as warnings and set the health endpoint to unhealthy.
 - Connects via `DOCKER_HOST=tcp://controller-proxy:2375` — no direct socket mount
 - `depends_on: controller-proxy`
 - `restart: unless-stopped`
+- `tmpfs: /root/.docker` — GHCR credentials written here (ephemeral, never touches overlay fs)
+- `volumes: ./seccomp/runner-profile.json:/home/ghrunner/infra-runner/seccomp/runner-profile.json:ro`
 - `healthcheck`: `docker ps --filter label=runner-managed=true` every 30s
 
 **deployer service**
@@ -270,6 +280,7 @@ Pull failures are logged as warnings and set the health endpoint to unhealthy.
 - Exposes `HEALTH_PORT` for the health endpoint
 - `depends_on: deployer-proxy`
 - `restart: unless-stopped`
+- `tmpfs: /root/.docker` — GHCR credentials written here (ephemeral, never touches overlay fs)
 - `healthcheck`: `GET /health` every 30s — compose can detect and restart a wedged deployer
 
 **Networks** (all within 172.20.0.0/24, outside the 10.89.0.0/16 runner pool):
