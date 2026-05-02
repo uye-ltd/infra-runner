@@ -17,7 +17,7 @@ no SSH push from CI is required.
 
 ```
 .
-├── Dockerfile                        # runner image (Ubuntu 22.04 + Docker CLI + Kaniko + GH runner binary)
+├── Dockerfile                        # runner image (ubuntu:24.04 + Docker CLI + Kaniko + GH runner binary)
 ├── entrypoint.sh                     # runner startup: accept token → config --ephemeral → run.sh
 ├── docker-compose.yml                # four services: two socket proxies + controller + deployer
 ├── .env.example                      # template for required env vars (copy → .env)
@@ -25,10 +25,10 @@ no SSH push from CI is required.
 ├── apparmor/
 │   └── infra-runner                    # AppArmor profile applied to every runner container
 ├── controller/
-│   ├── Dockerfile                    # controller image (Ubuntu 22.04 + docker-ce-cli + jq + uuidgen)
+│   ├── Dockerfile                    # controller image (ubuntu:24.04 + docker-ce-cli + jq + openssl + uuidgen)
 │   └── entrypoint.sh                 # pool manager: spawn/teardown ephemeral runners
 ├── deployer/
-│   ├── Dockerfile                    # deployer image (Ubuntu 22.04 + docker-ce-cli + compose + cosign + python3)
+│   ├── Dockerfile                    # deployer image (ubuntu:24.04 + docker-ce-cli + compose + cosign + python3)
 │   ├── entrypoint.sh                 # GitOps loop: verify sig → pull → docker compose up -d
 │   └── health_server.py              # minimal Python HTTP server for GET /health
 ├── scripts/
@@ -91,7 +91,6 @@ Loaded from `.env` (via `env_file` in Compose).
 | `GITHUB_APP_ID` | App path | — | Numeric GitHub App ID |
 | `GITHUB_APP_INSTALLATION_ID` | App path | — | Numeric installation ID (org-level install) |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | App path | — | Container path to the PEM key (mounted `:ro`) |
-| `GITHUB_APP_PRIVATE_KEY_HOST_PATH` | App path | — | Host filesystem path to the PEM key — used by `scripts/ghcr-login.sh` when run outside a container (the container mount path does not exist on the host) |
 | `GITHUB_TOKEN` | PAT path | — | Classic PAT fallback: `admin:org`, `manage_runners:org`, `read:packages` |
 
 If `GITHUB_TOKEN` is set it is used as-is and the `GITHUB_APP_*` vars are ignored. If it is unset all three `GITHUB_APP_*` vars are required. The controller mints a short-lived installation access token at startup and refreshes it every 55 minutes.
@@ -108,7 +107,7 @@ If `GITHUB_TOKEN` is set it is used as-is and the `GITHUB_APP_*` vars are ignore
 | `RUNNER_CPUS` | no | `2` | CPU limit per runner container |
 | `RUNNER_KANIKO_SIZE` | no | `5g` | tmpfs size for `/kaniko` scratch space inside runner |
 | `RUNNER_APPARMOR_PROFILE` | no | `infra-runner` | AppArmor profile name; empty to disable |
-| `RUNNER_SECCOMP_HOST_PATH` | no | — | Absolute **host** path to `seccomp/runner-profile.json` |
+| `RUNNER_SECCOMP_HOST_PATH` | no | — | Absolute **host** path to `seccomp/runner-profile.json`; Docker daemon resolves it on the host, not inside any container |
 | `COMPOSE_PROJECT_NAME` | yes | `infra-runner` | Must match the server directory name |
 | `POLL_INTERVAL` | no | `60` | Deployer digest check interval (seconds) |
 | `HEALTH_PORT` | no | `8080` | Deployer health endpoint port |
@@ -182,13 +181,16 @@ spawn_runner():
   b. docker network create runner-net-{id}  (bridge, labelled runner-managed=true)
   c. POST /orgs/{org}/actions/runners/registration-token → short-lived token
   d. docker run -d runner image → runner-job-{id}
+       --name runner-job-{id}
+       --network runner-net-{id}
        --memory --cpus
        [--security-opt seccomp=RUNNER_SECCOMP_HOST_PATH]
        [--security-opt apparmor=RUNNER_APPARMOR_PROFILE]
+       --label runner-managed=true  --label runner-job-id={id}  --label runner-role=runner
        -e GITHUB_ORG -e RUNNER_REGISTRATION_TOKEN -e RUNNER_NAME -e RUNNER_LABELS
-       --tmpfs /tmp:size=1g
-       --tmpfs /root:size=512m      (docker login credentials, runner config)
-       --tmpfs /kaniko:size=RUNNER_KANIKO_SIZE  (Kaniko layer scratch space)
+       --tmpfs /tmp:rw,nosuid,size=1g
+       --tmpfs /root:rw,nosuid,size=512m      (docker login credentials, runner config)
+       --tmpfs /kaniko:rw,nosuid,size=RUNNER_KANIKO_SIZE  (Kaniko layer scratch space)
 
 cleanup_job(job_id):
   docker rm -f runner-job-{id}
@@ -212,7 +214,7 @@ Startup:
     Write {"auths":{"ghcr.io":{"auth":"<base64>"}}} directly to /root/.docker/config.json
     App path: skipped — App installation tokens cannot access GHCR; packages must be public
   1. Start health_server.py in background (serves GET /health from /tmp/health)
-  2. set_healthy()  ← write {"status":"ok"} to /tmp/health
+  2. set_healthy()  ← write {"status":"ok","ts":"..."} to /tmp/health
   3. Log startup info (JSON)
 
 Poll loop (every POLL_INTERVAL seconds):
@@ -309,9 +311,12 @@ Dependabot sends update PRs when new versions are released.
      build-push deployer image   (context: ., dockerfile: deployer/Dockerfile)
      → each image: ghcr.io/{org}/{name}:{latest,sha}
 5. cosign sign (push events only):
-     cosign sign --yes runner@{digest}
-     cosign sign --yes controller@{digest}
-     cosign sign --yes deployer@{digest}
+     cosign sign --yes --registry-username $GITHUB_ACTOR --registry-password $GITHUB_TOKEN \
+       runner@{digest}
+     cosign sign --yes --registry-username $GITHUB_ACTOR --registry-password $GITHUB_TOKEN \
+       controller@{digest}
+     cosign sign --yes --registry-username $GITHUB_ACTOR --registry-password $GITHUB_TOKEN \
+       deployer@{digest}
      (keyless — signature is tied to this workflow's GitHub Actions OIDC identity)
 ```
 
@@ -334,17 +339,14 @@ from repo secrets if previously set.
 sudo useradd -m -s /bin/bash ghrunner
 sudo usermod -aG docker ghrunner
 
-# 2. Authenticate with GHCR (as ghrunner)
-sudo -iu ghrunner
-echo YOUR_PAT | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
-
-# 3. Run one-time setup scripts (as root)
+# 2. Run one-time setup scripts (as root)
 sudo bash ~/infra-runner/scripts/setup-egress-policy.sh
 sudo systemctl restart docker   # activates the Docker address pool change
 sudo bash ~/infra-runner/scripts/setup-apparmor.sh
 # Verify: aa-status | grep infra-runner
 
-# 4. Clone and configure (as ghrunner)
+# 3. Clone and configure (as ghrunner)
+sudo -iu ghrunner
 git clone https://github.com/YOUR_ORG/infra-runner ~/infra-runner
 cd ~/infra-runner
 cp .env.example .env
@@ -353,11 +355,13 @@ $EDITOR .env   # required: GITHUB_ORG, COMPOSE_PROJECT_NAME
                #              or: GITHUB_TOKEN (classic PAT, backward compat)
                # recommended: RUNNER_SECCOMP_HOST_PATH
 
-# 5. Start
+# 4. Start
+# GitHub App path: packages must be public — no GHCR auth needed for `docker compose pull`.
+# PAT path with private images: run `bash scripts/ghcr-login.sh` before pulling.
 docker compose pull      # pulls controller-proxy, deployer-proxy, controller, deployer
 docker compose up -d
 
-# 6. Verify
+# 5. Verify
 docker compose logs -f controller | jq .
 # → {"level":"info","svc":"controller","msg":"Runner is live","job_id":"..."}
 ```
@@ -471,8 +475,8 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
 - **Structured JSON logging.** Both controller and deployer emit newline-delimited JSON
   (`ts`, `level`, `svc`, `msg`, plus contextual fields). Pipe through `jq` or ingest with
   any log aggregator that reads Docker container logs.
-- **Health endpoint.** `GET :<HEALTH_PORT>/health` returns `200 {"status":"ok"}` during
-  normal operation and `503 {"status":"unhealthy","reason":"..."}` after a signature
+- **Health endpoint.** `GET :<HEALTH_PORT>/health` returns `200 {"status":"ok","ts":"..."}` during
+  normal operation and `503 {"status":"unhealthy","reason":"...","ts":"..."}` after a signature
   verification failure or compose error. Poll with UptimeRobot, Grafana, etc.
 - **The `.env` file and any mounted PEM key contain secrets — both are gitignored. Never commit them.**
 - **Remaining open threats:** proxy containers have full socket access (mitigated by being

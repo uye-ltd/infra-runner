@@ -103,7 +103,10 @@ $EDITOR .env   # required: GITHUB_ORG, COMPOSE_PROJECT_NAME
                #                             GITHUB_APP_PRIVATE_KEY_PATH
                #   Static PAT (fallback):    GITHUB_TOKEN
 
-# 3. Pull and start (packages must be public for GitHub App auth)
+# 3. Pull and start
+# GitHub App path: packages must be public — no host GHCR auth needed.
+# PAT path with private images: authenticate first:
+#   bash scripts/ghcr-login.sh
 docker compose pull
 docker compose up -d
 

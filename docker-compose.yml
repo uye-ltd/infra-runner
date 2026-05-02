@@ -86,7 +86,7 @@ services:
     # Required GitHub App permissions:
     #   Organization → Self-hosted runners: Read & write
     #   Organization → Members: Read (required alongside runners)
-    #   Packages: Read (to pull runner image from GHCR if private)
+    # Note: App installation tokens cannot access GHCR. Runner images must be public.
     # ─────────────────────────────────────────────────────────────────────────
     tmpfs:
       - /root/.docker   # docker login writes here; ephemeral, never touches overlay fs
