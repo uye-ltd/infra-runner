@@ -24,6 +24,9 @@ services:
       DELETE:     1   # allow delete operations
       INFO:       1   # docker info (used by compose internals)
       # All others (EXEC, BUILD, PLUGINS, SYSTEM, SWARM, SECRETS) default to 0
+      TIMEOUT_CONNECT: "5"
+      TIMEOUT_CLIENT:  "60"
+      TIMEOUT_SERVER:  "60"
     deploy:
       resources:
         limits:
@@ -47,6 +50,9 @@ services:
       DELETE:     1
       INFO:       1
       # EXEC, BUILD, PLUGINS, SYSTEM, SWARM, SECRETS default to 0
+      TIMEOUT_CONNECT: "5"
+      TIMEOUT_CLIENT:  "60"
+      TIMEOUT_SERVER:  "60"
     deploy:
       resources:
         limits:
@@ -88,6 +94,8 @@ services:
     #   Organization → Members: Read (required alongside runners)
     #   Packages: Read (to pull runner image from GHCR if private)
     # ─────────────────────────────────────────────────────────────────────────
+    tmpfs:
+      - /root/.docker   # docker login writes here; ephemeral, never touches overlay fs
     healthcheck:
       test: ["CMD", "docker", "ps", "--filter", "label=runner-managed=true", "-q"]
       interval: 30s
@@ -117,6 +125,8 @@ services:
       DOCKER_HOST: tcp://deployer-proxy:2375
     ports:
       - "${HEALTH_PORT:-8080}:${HEALTH_PORT:-8080}"
+    tmpfs:
+      - /root/.docker   # docker login writes here; ephemeral, never touches overlay fs
     volumes:
       - ./:/workspace:ro   # deployer reads compose file + .env to apply updates
     healthcheck:
