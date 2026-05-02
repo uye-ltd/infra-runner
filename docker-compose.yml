@@ -24,9 +24,6 @@ services:
       DELETE:     1   # allow delete operations
       INFO:       1   # docker info (used by compose internals)
       # All others (EXEC, BUILD, PLUGINS, SYSTEM, SWARM, SECRETS) default to 0
-      TIMEOUT_CONNECT: "5"
-      TIMEOUT_CLIENT:  "60"
-      TIMEOUT_SERVER:  "60"
     deploy:
       resources:
         limits:
@@ -50,9 +47,6 @@ services:
       DELETE:     1
       INFO:       1
       # EXEC, BUILD, PLUGINS, SYSTEM, SWARM, SECRETS default to 0
-      TIMEOUT_CONNECT: "5"
-      TIMEOUT_CLIENT:  "60"
-      TIMEOUT_SERVER:  "60"
     deploy:
       resources:
         limits:
@@ -96,6 +90,8 @@ services:
     # ─────────────────────────────────────────────────────────────────────────
     tmpfs:
       - /root/.docker   # docker login writes here; ephemeral, never touches overlay fs
+    volumes:
+      - ./seccomp/runner-profile.json:/home/ghrunner/infra-runner/seccomp/runner-profile.json:ro
     healthcheck:
       test: ["CMD", "docker", "ps", "--filter", "label=runner-managed=true", "-q"]
       interval: 30s

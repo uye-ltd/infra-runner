@@ -82,9 +82,10 @@ set_unhealthy() {
 # ---------------------------------------------------------------------------
 
 ghcr_login() {
-  printf '%s' "${GITHUB_TOKEN}" \
-    | docker login ghcr.io -u "${GITHUB_ORG}" --password-stdin \
-    || log warn "GHCR login failed — pulls of private images will fail"
+  local auth_b64
+  auth_b64=$(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 -w0)
+  printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "${auth_b64}" > /root/.docker/config.json \
+    || log warn "GHCR auth setup failed — pulls of private images will fail"
 }
 
 acquire_github_token() {
@@ -107,7 +108,6 @@ maybe_refresh_github_token() {
   if (( elapsed >= 3300 )); then
     log info "GitHub App token nearing expiry; refreshing" elapsed_s "${elapsed}"
     acquire_github_token
-    ghcr_login
   fi
 }
 
@@ -155,15 +155,15 @@ set_healthy
 log info "Deployer starting" project "${COMPOSE_PROJECT_NAME}" poll_interval "${POLL_INTERVAL}s"
 log info "Signature policy" identity "${CERT_IDENTITY}"
 
-# Authenticate with GHCR. On the App path a fresh installation token is minted
-# first; on the PAT path the token already present in the environment is used.
-# docker pull delegates auth to the calling client (not the daemon), so the
-# CLI inside this container needs its own credentials.
+# Authenticate with GHCR. On the PAT path the token in the environment is used
+# directly. On the App path, GHCR login is skipped — App installation tokens
+# cannot access GHCR regardless of permissions; packages must be public.
 if [[ "${_USING_GITHUB_APP}" == "true" ]]; then
   acquire_github_token
+else
+  log info "Authenticating with GHCR"
+  ghcr_login
 fi
-log info "Authenticating with GHCR"
-ghcr_login
 
 # ---------------------------------------------------------------------------
 # Graceful shutdown
