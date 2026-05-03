@@ -53,6 +53,7 @@ profile infra-runner flags=(attach_disconnected,mediate_deleted) {
   network inet6 tcp,
   network inet6 udp,
   network netlink raw,   # required by several system tools for interface queries
+  network unix  stream,  # required by runner for internal IPC
 
   deny network raw,
   deny network packet,
@@ -63,7 +64,7 @@ profile infra-runner flags=(attach_disconnected,mediate_deleted) {
   # ---------------------------------------------------------------------------
 
   # Allow everything by default — workflows need to read/write/exec broadly
-  /** rwlkm,
+  /** rwlkmix,
 
   # --- Kernel tunables and trigger files ---
   deny /proc/sysrq-trigger        w,
