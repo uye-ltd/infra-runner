@@ -17,7 +17,7 @@ no SSH push from CI is required.
 
 ```
 .
-├── Dockerfile                        # runner image (ubuntu:24.04 + Docker CLI + Kaniko + GH runner binary)
+├── Dockerfile                        # runner image (ubuntu:24.04 + Docker CLI + Buildah + fuse-overlayfs + Kaniko compat + GH runner binary)
 ├── entrypoint.sh                     # runner startup: accept token → config --ephemeral → run.sh
 ├── docker-compose.yml                # four services: two socket proxies + controller + deployer
 ├── .env.example                      # template for required env vars (copy → .env)
@@ -69,14 +69,15 @@ docker-compose (172.20.0.0/24 service space)
 
 Per job — created by controller, destroyed after job completes:
 ├── runner-net-{id}     isolated bridge network (10.89.x.x/24, egress-restricted)
-└── runner-job-{id}     ephemeral runner (Kaniko binary for image builds)
+└── runner-job-{id}     ephemeral runner (Buildah + fuse-overlayfs for image builds)
 ```
 
 The runner container has no Docker socket and no privileged flag. Image builds use
-**Kaniko**, which builds Docker images from a Dockerfile entirely in userspace without
-a daemon or a privileged container. The controller's GitHub credential (App installation
-token or PAT) never enters runner containers — runners receive only a short-lived
-registration token.
+**Buildah** with **fuse-overlayfs** storage, which builds OCI images entirely in userspace
+without a daemon or a privileged container. The `kaniko` binary is also present for
+backward compatibility with existing workflows. The controller's GitHub credential (App
+installation token or PAT) never enters runner containers — runners receive only a
+short-lived registration token.
 
 ---
 
@@ -105,7 +106,7 @@ If `GITHUB_TOKEN` is set it is used as-is and the `GITHUB_APP_*` vars are ignore
 | `DESIRED_IDLE` | no | `2` | Warm idle runners to keep ready at all times |
 | `RUNNER_MEMORY` | no | `4g` | Memory limit per runner container |
 | `RUNNER_CPUS` | no | `2` | CPU limit per runner container |
-| `RUNNER_KANIKO_SIZE` | no | `5g` | tmpfs size for `/kaniko` scratch space inside runner |
+| `RUNNER_KANIKO_SIZE` | no | `5g` | tmpfs size for `/kaniko` inside runner — used as Buildah's `graphRoot` (image layer storage) and Kaniko scratch space |
 | `RUNNER_APPARMOR_PROFILE` | no | `infra-runner` | AppArmor profile name; empty to disable |
 | `RUNNER_SECCOMP_HOST_PATH` | no | — | Absolute **host** path to `seccomp/runner-profile.json`; Docker daemon resolves it on the host, not inside any container |
 | `COMPOSE_PROJECT_NAME` | yes | `infra-runner` | Must match the server directory name |
@@ -140,16 +141,19 @@ resolves it there. Leave empty to fall back to Docker's default seccomp profile.
   Both must be updated together when bumping the runner — see *Updating the runner binary* below.
 - **Docker CLI**: `docker-ce-cli` only — no daemon. Used for `docker login` (writes registry
   credentials to `~/.docker/config.json`). `docker build`/`run`/`push` have no daemon to reach.
-- **Kaniko**: `COPY --from=gcr.io/kaniko-project/executor:v1.24.0 /kaniko/executor /usr/local/bin/kaniko`
-  — statically linked binary, version-pinned so Dependabot tracks updates. Workflows call
-  `kaniko` instead of `docker build && docker push`.
+- **Buildah + fuse-overlayfs**: primary daemonless image builder. Installed via `apt-get`.
+  `/etc/containers/storage.conf` sets `driver=overlay`, `graphRoot=/kaniko`, and
+  `mount_program=/usr/bin/fuse-overlayfs`. Workflows call `buildah build` and `buildah push`.
+- **Kaniko**: `COPY --from=ghcr.io/chainguard-forks/kaniko/executor:v1.25.0 /kaniko/executor /usr/local/bin/kaniko`
+  — kept for backward compat with existing workflows. Sourced from the Chainguard community
+  fork (Google archived the original on 2025-06-03). Version-pinned so Dependabot tracks updates.
 - **Runner binary**: downloaded from `github.com/actions/runner/releases`, SHA256-verified
   before extraction, then extracted to `/opt/actions-runner/`.
-- **User**: root — required by Kaniko to extract image layers and execute `RUN` instructions.
-  Container-level controls (seccomp, AppArmor, resource limits, no Docker socket, ephemeral)
-  are the security boundary. The controller also grants explicit capabilities at spawn time
-  (`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`) so Kaniko can unpack image layers
-  that include files like `/etc/shadow` (root:shadow 640).
+- **User**: root — required by Buildah and Kaniko to extract image layers and execute `RUN`
+  instructions. Container-level controls (seccomp, AppArmor, resource limits, no Docker socket,
+  ephemeral) are the security boundary. The controller grants explicit capabilities at spawn time
+  (`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`) so image layer extraction can unpack
+  files with restrictive ownership like `/etc/shadow` (root:shadow 640).
 - **Entrypoint**: `entrypoint.sh`
 
 ---
@@ -205,7 +209,8 @@ spawn_runner():
        -e GITHUB_ORG -e RUNNER_REGISTRATION_TOKEN -e RUNNER_NAME -e RUNNER_LABELS
        --tmpfs /tmp:rw,nosuid,size=1g
        --tmpfs /root:rw,nosuid,size=512m      (docker login credentials, runner config)
-       --tmpfs /kaniko:rw,nosuid,size=RUNNER_KANIKO_SIZE  (Kaniko layer scratch space)
+       --tmpfs /kaniko:rw,nosuid,size=RUNNER_KANIKO_SIZE  (Buildah graphRoot + Kaniko scratch space)
+       --device /dev/fuse                                (required by fuse-overlayfs)
 
 cleanup_job(job_id):
   docker rm -f runner-job-{id}
@@ -473,11 +478,11 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
 
 ## Security notes
 
-- **No privileged containers in the job path.** Kaniko builds images in userspace without
-  `--privileged`. The DinD host-escape vector is eliminated entirely. Runner containers
-  receive a minimal explicit capability set (`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`,
-  `SETGID`) required by Kaniko to unpack OCI image layers; all other capabilities use
-  Docker defaults, and dangerous ones (`SYS_ADMIN`, `SYS_MODULE`, `NET_RAW`, etc.) are
+- **No privileged containers in the job path.** Buildah with fuse-overlayfs builds images
+  in userspace without `--privileged`. The DinD host-escape vector is eliminated entirely.
+  Runner containers receive a minimal explicit capability set (`CHOWN`, `DAC_OVERRIDE`,
+  `FOWNER`, `SETUID`, `SETGID`) required to unpack OCI image layers; all other capabilities
+  use Docker defaults, and dangerous ones (`SYS_ADMIN`, `SYS_MODULE`, `NET_RAW`, etc.) are
   denied by the AppArmor profile.
 - **The controller's GitHub credential never enters runner containers.** The controller
   holds either a GitHub App installation token (preferred, auto-refreshed every 55 min) or
@@ -489,8 +494,10 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
   `EXEC` and `BUILD` are disabled on both proxies — these are the primary escape vectors.
   The proxy containers themselves still mount the raw socket (unavoidable); they are minimal,
   versioned, and tracked by Dependabot.
-- **Seccomp** blocks kernel-level syscalls (`mount`, `kexec_*`, `bpf`, kernel modules)
-  that are the basis of most container escape techniques.
+- **Seccomp** blocks kernel-level syscalls (`kexec_*`, `bpf`, kernel modules, `pivot_root`)
+  that are the basis of most container escape techniques. `mount`/`umount2` are intentionally
+  re-opened to support fuse-overlayfs; the AppArmor profile compensates by restricting
+  allowed mount types to `fstype=fuse.*` only.
 - **AppArmor profile** (`apparmor/infra-runner`) is applied to every runner container via
   `--security-opt apparmor=infra-runner`. It denies dangerous capabilities (`sys_module`,
   `sys_admin`, `net_raw`), raw/packet sockets, writes to kernel tunables and sysfs, and

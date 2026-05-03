@@ -22,11 +22,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get install -y --no-install-recommends docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
 
-# Kaniko executor — builds Docker images from a Dockerfile without a daemon
-# and without a privileged container. Kaniko requires root inside the container
-# but the container itself is unprivileged.
+# Kaniko executor — kept for backward compat with workflows that call `kaniko` directly.
+# Sourced from the Chainguard community fork (original archived by Google 2025-06-03).
 # Version pinned so Dependabot can track updates and builds are reproducible.
-COPY --from=gcr.io/kaniko-project/executor:v1.24.0 /kaniko/executor /usr/local/bin/kaniko
+COPY --from=ghcr.io/chainguard-forks/kaniko/executor:v1.25.0 /kaniko/executor /usr/local/bin/kaniko
+
+# Buildah + fuse-overlayfs — primary daemonless image builder.
+# fuse-overlayfs provides copy-on-write layer storage over FUSE (no kernel overlay mount,
+# no --privileged). graphRoot=/kaniko reuses the controller-mounted tmpfs (RUNNER_KANIKO_SIZE).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      buildah \
+      fuse-overlayfs \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /etc/containers \
+    && printf '[storage]\n  driver = "overlay"\n  graphRoot = "/kaniko"\n\n[storage.options]\n\n  [storage.options.overlay]\n    mount_program = "/usr/bin/fuse-overlayfs"\n' \
+       > /etc/containers/storage.conf
 
 WORKDIR /opt/actions-runner
 
@@ -44,7 +54,7 @@ RUN ./bin/installdependencies.sh
 COPY entrypoint.sh /opt/actions-runner/entrypoint.sh
 RUN chmod +x /opt/actions-runner/entrypoint.sh
 
-# Runs as root — required by Kaniko for layer extraction and RUN instruction execution.
+# Runs as root — required by Kaniko and Buildah for layer extraction and RUN instruction execution.
 # Container-level isolation (seccomp, resource limits, no Docker socket, ephemeral)
 # is the security boundary, not the in-container user.
 ENTRYPOINT ["/opt/actions-runner/entrypoint.sh"]

@@ -101,4 +101,11 @@ profile infra-runner flags=(attach_disconnected,mediate_deleted) {
   deny /sbin/insmod   x,
   deny /sbin/rmmod    x,
   deny /lib/modules/** w,
+
+  # --- fuse-overlayfs ---
+  # mount/umount2 are re-opened in seccomp for Buildah's fuse-overlayfs storage driver.
+  # AppArmor compensates by restricting mount to fstype=fuse.* only — kernel overlay,
+  # proc, sysfs, bind, and all other mount types remain implicitly denied.
+  mount fstype=fuse.*,
+  umount,
 }

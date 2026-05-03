@@ -196,6 +196,7 @@ spawn_runner() {
     --tmpfs /tmp:rw,nosuid,size=1g \
     --tmpfs /root:rw,nosuid,size=512m \
     --tmpfs /kaniko:rw,nosuid,size="${RUNNER_KANIKO_SIZE}" \
+    --device /dev/fuse \
     -e GITHUB_ORG="${GITHUB_ORG}" \
     -e RUNNER_REGISTRATION_TOKEN="${reg_token}" \
     -e RUNNER_NAME="${runner_ctr}" \

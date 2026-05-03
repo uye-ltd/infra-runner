@@ -8,8 +8,6 @@
   "syscalls": [
     {
       "names": [
-        "mount",
-        "umount2",
         "pivot_root",
         "kexec_load",
         "kexec_file_load",
@@ -25,7 +23,7 @@
         "bpf"
       ],
       "action": "SCMP_ACT_ERRNO",
-      "comment": "Block kernel-level syscalls that could be used for container escape or host compromise. The runner connects to DinD over TLS and does not need any of these."
+      "comment": "Block kernel-level syscalls that could be used for container escape or host compromise. mount/umount2 are intentionally omitted: fuse-overlayfs requires them, and the AppArmor profile restricts allowed mount types to fstype=fuse.* only."
     }
   ]
 }
