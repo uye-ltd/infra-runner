@@ -195,6 +195,7 @@ spawn_runner() {
     -e RUNNER_REGISTRATION_TOKEN="${reg_token}" \
     -e RUNNER_NAME="${runner_ctr}" \
     -e RUNNER_LABELS="${RUNNER_LABELS}" \
+    -e RUNNER_ALLOW_RUNASROOT=1 \
     "${RUNNER_IMAGE}" > /dev/null
 
   log info "Runner is live" job_id "${job_id}"
