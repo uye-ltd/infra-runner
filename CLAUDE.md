@@ -147,7 +147,9 @@ resolves it there. Leave empty to fall back to Docker's default seccomp profile.
   before extraction, then extracted to `/opt/actions-runner/`.
 - **User**: root — required by Kaniko to extract image layers and execute `RUN` instructions.
   Container-level controls (seccomp, AppArmor, resource limits, no Docker socket, ephemeral)
-  are the security boundary.
+  are the security boundary. The controller also grants explicit capabilities at spawn time
+  (`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`) so Kaniko can unpack image layers
+  that include files like `/etc/shadow` (root:shadow 640).
 - **Entrypoint**: `entrypoint.sh`
 
 ---
@@ -196,6 +198,7 @@ spawn_runner():
        --name runner-job-{id}
        --network runner-net-{id}
        --memory --cpus
+       --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add SETUID --cap-add SETGID
        [--security-opt seccomp=RUNNER_SECCOMP_HOST_PATH]
        [--security-opt apparmor=RUNNER_APPARMOR_PROFILE]
        --label runner-managed=true  --label runner-job-id={id}  --label runner-role=runner
@@ -471,7 +474,11 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
 ## Security notes
 
 - **No privileged containers in the job path.** Kaniko builds images in userspace without
-  `--privileged`. The DinD host-escape vector is eliminated entirely.
+  `--privileged`. The DinD host-escape vector is eliminated entirely. Runner containers
+  receive a minimal explicit capability set (`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`,
+  `SETGID`) required by Kaniko to unpack OCI image layers; all other capabilities use
+  Docker defaults, and dangerous ones (`SYS_ADMIN`, `SYS_MODULE`, `NET_RAW`, etc.) are
+  denied by the AppArmor profile.
 - **The controller's GitHub credential never enters runner containers.** The controller
   holds either a GitHub App installation token (preferred, auto-refreshed every 55 min) or
   a static PAT. Runners receive only a short-lived registration token that expires after one use.

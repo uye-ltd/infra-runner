@@ -183,6 +183,11 @@ spawn_runner() {
     --network "${net_name}" \
     --memory="${RUNNER_MEMORY}" \
     --cpus="${RUNNER_CPUS}" \
+    --cap-add CHOWN \
+    --cap-add DAC_OVERRIDE \
+    --cap-add FOWNER \
+    --cap-add SETUID \
+    --cap-add SETGID \
     "${seccomp_flag[@]}" \
     "${apparmor_flag[@]}" \
     --label runner-managed=true \
