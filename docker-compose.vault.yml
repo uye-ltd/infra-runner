@@ -1,0 +1,16 @@
+# docker-compose.vault.yml — optional overlay for Vault integration
+#
+# Extends the deployer service to mount the infra-vault workspace so it can:
+#   - Run `docker compose up -d vault-unseal` when a new image is detected
+#   - Read vault/policies/*.hcl for bind-mounting into the policy-sync container
+#
+# Activate by adding to .env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.vault.yml
+#
+# Prerequisites:
+#   - infra-vault must be deployed on this server (creates the vault-net network)
+#   - VAULT_COMPOSE_DIR, VAULT_TOKEN, VAULT_CERT_IDENTITY must be set in .env
+services:
+  deployer:
+    volumes:
+      - ${VAULT_COMPOSE_DIR}:/workspace-vault:ro

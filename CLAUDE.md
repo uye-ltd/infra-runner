@@ -113,6 +113,18 @@ If `GITHUB_TOKEN` is set it is used as-is and the `GITHUB_APP_*` vars are ignore
 | `HEALTH_PORT` | no | `8080` | Deployer health endpoint port |
 | `CONTROLLER_POLL_INTERVAL` | no | `15` | Controller pool maintenance cycle interval (seconds) |
 
+**Vault integration** (all optional; enable by activating `docker-compose.vault.yml` overlay):
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `VAULT_COMPOSE_DIR` | yes (vault) | — | Absolute host path to infra-vault checkout |
+| `VAULT_CERT_IDENTITY` | yes (vault) | — | cosign cert identity for vault-unseal CI workflow |
+| `VAULT_TOKEN` | yes (vault) | — | Vault operator token for policy sync (stays on server) |
+| `VAULT_ADDR` | no | `http://vault:8200` | Vault address reachable on vault-net |
+| `VAULT_NET` | no | `vault-net` | Docker network Vault is on |
+| `VAULT_UNSEAL_IMAGE` | no | `ghcr.io/${GITHUB_ORG}/vault-unseal:latest` | Full image ref to watch |
+| `COMPOSE_FILE` | vault activation | `docker-compose.yml` | Set to `docker-compose.yml:docker-compose.vault.yml` to add vault workspace mount |
+
 `RUNNER_IMAGE` and `DOCKER_HOST` are set in the Compose `environment` block (not `.env`)
 and must not be overridden there.
 
@@ -245,13 +257,30 @@ Poll loop (every POLL_INTERVAL seconds):
        (controller uses locally cached image on next spawn — never blocked on a pull)
      If NOT verified: set_unhealthy; local cache untouched
 
-  4. set_healthy()  ← clears any transient error state from this cycle
+  4. vault-unseal image (only when _VAULT_ENABLED=true):
+     pull_if_new(VAULT_UNSEAL_IMAGE)
+     If new image downloaded:
+       verify_image(VAULT_UNSEAL_IMAGE, VAULT_CERT_IDENTITY)  ← separate cert identity
+       If verified: docker compose --project-name infra-vault \
+                      --project-directory /workspace-vault up -d --no-deps vault-unseal
+       If compose fails: set_unhealthy
+       If NOT verified: set_unhealthy; skip
+
+  5. Vault policy sync (every cycle, idempotent; skipped if VAULT_TOKEN unset):
+     docker run --rm --network VAULT_NET hashicorp/vault:1.17
+       (short-lived container on vault-net — Docker resolves bind-mount path on the HOST)
+       For each vault/policies/*.hcl: vault policy write <name> <file>
+     Failure is logged as a warning (Vault may be sealed); does NOT set_unhealthy
+
+  6. set_healthy()  ← clears any transient error state from this cycle
        Skipped if runner image pull failed (preserves unhealthy state)
 
-  5. sleep POLL_INTERVAL
+  7. sleep POLL_INTERVAL
 ```
 
-`verify_image()` calls `cosign verify --certificate-identity <workflow-url> --certificate-oidc-issuer <token.actions.githubusercontent.com>`.
+`verify_image(image [cert_identity])` calls `cosign verify --certificate-identity <cert_identity> --certificate-oidc-issuer <token.actions.githubusercontent.com>`.
+The second argument defaults to `$CERT_IDENTITY` (infra-runner's own workflow identity) when omitted.
+vault-unseal passes `$VAULT_CERT_IDENTITY` explicitly (infra-vault's workflow identity).
 Signature failures are immediately written to `/tmp/health` (atomically via `.tmp` + `mv`) and logged at `error` level.
 Pull failures are logged as warnings and set the health endpoint to unhealthy.
 
@@ -292,6 +321,11 @@ Pull failures are logged as warnings and set the health endpoint to unhealthy.
 - `deployer-net`: 172.20.128.64/26 — deployer egress (internet, GHCR)
 
 **No named volumes** — the controller creates no volumes in the current architecture.
+
+**`docker-compose.vault.yml`** — optional overlay (activated by setting `COMPOSE_FILE` in `.env`).
+Extends the deployer service with `${VAULT_COMPOSE_DIR}:/workspace-vault:ro` so the deployer can
+run `docker compose --project-directory /workspace-vault up -d vault-unseal`. The base
+`docker-compose.yml` is unchanged; vault integration is strictly opt-in.
 
 ---
 

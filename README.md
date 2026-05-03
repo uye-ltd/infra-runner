@@ -159,6 +159,18 @@ Copy `.env.example` to `.env`. Exactly one auth path must be configured:
 | `HEALTH_PORT` | no | `8080` | Port for the deployer health endpoint |
 | `CONTROLLER_POLL_INTERVAL` | no | `15` | Seconds between controller pool maintenance cycles |
 
+**Vault integration** (all optional — activate with `COMPOSE_FILE` below):
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `VAULT_COMPOSE_DIR` | yes (vault) | — | Absolute host path to infra-vault checkout |
+| `VAULT_CERT_IDENTITY` | yes (vault) | — | cosign cert identity for vault-unseal image signing |
+| `VAULT_TOKEN` | yes (vault) | — | Vault operator token for policy sync (server-side only) |
+| `VAULT_ADDR` | no | `http://vault:8200` | Vault address reachable on vault-net |
+| `VAULT_NET` | no | `vault-net` | Docker network Vault is on |
+| `VAULT_UNSEAL_IMAGE` | no | `ghcr.io/${GITHUB_ORG}/vault-unseal:latest` | Image ref to watch |
+| `COMPOSE_FILE` | vault activation | `docker-compose.yml` | Set to `docker-compose.yml:docker-compose.vault.yml` |
+
 ---
 
 ## Using the runner in a workflow
@@ -169,32 +181,42 @@ There is no Docker daemon in the runner. Use `kaniko` for building and pushing i
 ```yaml
 jobs:
   build:
-    runs-on: self-hosted   # or a custom label from RUNNER_LABELS
+    runs-on: [self-hosted, linux, x64]
     permissions:
-      contents: read     # minimum — declare only what this workflow needs
-      packages: write    # push to GHCR
+      contents: read
+      packages: write
+      id-token: write   # required for cosign OIDC keyless signing
     steps:
       - uses: actions/checkout@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: Build and push
+      - name: Build and push with Kaniko
         run: |
           kaniko \
-            --context=$GITHUB_WORKSPACE \
-            --dockerfile=Dockerfile \
-            --destination=ghcr.io/${{ github.repository_owner }}/myapp:latest \
-            --destination=ghcr.io/${{ github.repository_owner }}/myapp:${{ github.sha }} \
-            --cleanup
+            --context="${GITHUB_WORKSPACE}" \
+            --dockerfile="Dockerfile" \
+            --destination="ghcr.io/${{ github.repository_owner }}/myapp:latest" \
+            --destination="ghcr.io/${{ github.repository_owner }}/myapp:${{ github.sha }}"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image
+        run: |
+          cosign sign --yes \
+            "ghcr.io/${{ github.repository_owner }}/myapp:latest" \
+            "ghcr.io/${{ github.repository_owner }}/myapp:${{ github.sha }}"
 ```
 
-`docker/login-action` writes credentials to `~/.docker/config.json` (on a tmpfs inside
-the runner container). Kaniko reads from there automatically. No `--registry-*` flags needed.
+`docker login` writes credentials to `~/.docker/config.json` (on a tmpfs inside the runner
+container). Kaniko and cosign both read from there automatically.
+
+Use `id-token: write` only if you are cosign-signing images (requires OIDC). Omit it for
+pure build+push workflows where no deployer verification is needed.
 
 `--cleanup` removes extracted image layers after the build, keeping disk usage low.
 Kaniko's scratch space is limited to `RUNNER_KANIKO_SIZE` (default `5g`) via tmpfs.
@@ -229,18 +251,55 @@ only what each workflow needs and set the org-level default to read-only:
 ## GitOps deploy flow
 
 ```
-push to main
-  → CI builds runner / controller / deployer images
+push to main (infra-runner or infra-vault)
+  → CI builds images on self-hosted runner
   → CI pushes to GHCR with :latest and :sha tags
-  → CI signs each image with cosign (keyless, OIDC-anchored to this workflow)
-  → deployer detects new digest
-      → new deployer image?   → verify sig → self-update → exit
-      → new controller image? → verify sig → docker compose up -d controller
-      → always               → verify runner sig → pre-pull for fast spawns
+  → CI signs each image with cosign (keyless, OIDC-anchored to the workflow)
+  → deployer detects new digest (every POLL_INTERVAL seconds, default 60s)
+      → new deployer image?      → verify sig → self-update → exit
+      → new controller image?    → verify sig → docker compose up -d controller
+      → always                   → verify runner sig → pre-pull for fast spawns
+      → new vault-unseal image?  → verify sig → docker compose up -d vault-unseal
+                                    (vault integration only — see below)
+      → always                   → apply vault/policies/*.hcl via short-lived vault container
+                                    (vault integration only; skipped if VAULT_TOKEN unset)
 ```
 
 A signature verification failure immediately sets `GET /health` to `503` and skips
 the update — the currently running (verified) image stays in place.
+
+---
+
+## Vault integration
+
+The deployer can optionally manage a companion [infra-vault](https://github.com/uye-ltd/infra-vault) deployment on the same server: detecting new `vault-unseal` images, deploying them, and continuously syncing Vault policies — all without a deploy job in infra-vault's CI.
+
+### Prerequisites
+
+- infra-vault already deployed on this server (`docker compose -f docker/docker-compose.yml up -d`)
+- `vault-unseal` GHCR package set to **public** (required for App installation token auth path)
+
+### Setup
+
+```bash
+# 1. Enable vault integration in .env:
+VAULT_COMPOSE_DIR=/home/ghrunner/infra-vault
+VAULT_TOKEN=hvs.XXXX                     # Vault operator token from `make init` output
+VAULT_ADDR=http://vault:8200
+VAULT_CERT_IDENTITY=https://github.com/uye-ltd/infra-vault/.github/workflows/deploy.yml@refs/heads/main
+COMPOSE_FILE=docker-compose.yml:docker-compose.vault.yml
+
+# 2. Apply:
+docker compose up -d deployer
+```
+
+### What the deployer does (every poll cycle)
+
+1. Checks GHCR for a new `vault-unseal` image digest
+2. If new: verifies cosign signature → `docker compose up -d vault-unseal`
+3. Always: applies `vault/policies/*.hcl` via a short-lived `hashicorp/vault` container on `vault-net`
+
+Policy sync is idempotent and runs every cycle — a policy-only commit to infra-vault takes effect within `POLL_INTERVAL` seconds without rebuilding the image.
 
 ---
 
