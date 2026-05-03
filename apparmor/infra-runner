@@ -64,6 +64,7 @@ profile infra-runner flags=(attach_disconnected,mediate_deleted) {
   # ---------------------------------------------------------------------------
 
   # Allow everything by default — workflows need to read/write/exec broadly
+  /   r,        # .NET runtime walks up to root enumerating parent dirs
   /** rwlkmix,
 
   # --- Kernel tunables and trigger files ---
