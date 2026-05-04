@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Kaniko executor — kept for backward compat with workflows that call `kaniko` directly.
 # Sourced from the Chainguard community fork (original archived by Google 2025-06-03).
 # Version pinned so Dependabot can track updates and builds are reproducible.
-COPY --from=ghcr.io/chainguard-forks/kaniko/executor:v1.25.0 /kaniko/executor /usr/local/bin/kaniko
+COPY --from=ghcr.io/kaniko-build/dist/chainguard-forks-kaniko/executor:v1.25.14 /kaniko/executor /usr/local/bin/kaniko
 
 # Buildah + fuse-overlayfs — primary daemonless image builder.
 # fuse-overlayfs provides copy-on-write layer storage over FUSE (no kernel overlay mount,

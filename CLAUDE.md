@@ -144,9 +144,10 @@ resolves it there. Leave empty to fall back to Docker's default seccomp profile.
 - **Buildah + fuse-overlayfs**: primary daemonless image builder. Installed via `apt-get`.
   `/etc/containers/storage.conf` sets `driver=overlay`, `graphRoot=/kaniko`, and
   `mount_program=/usr/bin/fuse-overlayfs`. Workflows call `buildah build` and `buildah push`.
-- **Kaniko**: `COPY --from=ghcr.io/chainguard-forks/kaniko/executor:v1.25.0 /kaniko/executor /usr/local/bin/kaniko`
-  — kept for backward compat with existing workflows. Sourced from the Chainguard community
-  fork (Google archived the original on 2025-06-03). Version-pinned so Dependabot tracks updates.
+- **Kaniko**: `COPY --from=ghcr.io/kaniko-build/dist/chainguard-forks-kaniko/executor:v1.25.14 /kaniko/executor /usr/local/bin/kaniko`
+  — kept for backward compat with existing workflows. Built from the Chainguard community fork
+  of the original (Google archived on 2025-06-03); published by the `kaniko-build` org.
+  Version-pinned so Dependabot tracks updates.
 - **Runner binary**: downloaded from `github.com/actions/runner/releases`, SHA256-verified
   before extraction, then extracted to `/opt/actions-runner/`.
 - **User**: root — required by Buildah and Kaniko to extract image layers and execute `RUN`
