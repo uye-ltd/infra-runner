@@ -94,8 +94,8 @@ fetch_registration_token() {
 cleanup_job() {
   local job_id="$1"
   log info "Cleaning up job" job_id "${job_id}"
-  docker rm -f "runner-job-${job_id}"  2>/dev/null || true
-  docker network rm "runner-net-${job_id}" 2>/dev/null || true
+  docker rm -f "runner-job-${job_id}"  > /dev/null 2>&1 || true
+  docker network rm "runner-net-${job_id}" > /dev/null 2>&1 || true
 }
 
 cleanup_all_managed() {
@@ -112,7 +112,7 @@ cleanup_all_managed() {
     --filter "label=runner-managed=true" \
     --format '{{.Name}}' \
     | while read -r net; do
-        docker network rm "${net}" 2>/dev/null || true
+        docker network rm "${net}" > /dev/null 2>&1 || true
       done
 }
 

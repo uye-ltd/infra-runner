@@ -405,7 +405,7 @@ docker compose pull      # pulls controller-proxy, deployer-proxy, controller, d
 docker compose up -d
 
 # 5. Verify
-docker compose logs -f controller | jq .
+docker compose logs -f --no-log-prefix controller | jq .
 # → {"level":"info","svc":"controller","msg":"Runner is live","job_id":"..."}
 ```
 
@@ -422,8 +422,8 @@ This prevents PR workflows from unknown contributors from queuing at all.
 
 ```bash
 # Follow logs (JSON — pipe through jq for readability)
-docker compose logs -f controller | jq .
-docker compose logs -f deployer   | jq .
+docker compose logs -f --no-log-prefix controller | jq .
+docker compose logs -f --no-log-prefix deployer   | jq .
 
 # Check health endpoint
 curl -s http://localhost:8080/health | jq .
@@ -484,7 +484,11 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
   Runner containers receive a minimal explicit capability set (`CHOWN`, `DAC_OVERRIDE`,
   `FOWNER`, `SETUID`, `SETGID`) required to unpack OCI image layers; all other capabilities
   use Docker defaults, and dangerous ones (`SYS_ADMIN`, `SYS_MODULE`, `NET_RAW`, etc.) are
-  denied by the AppArmor profile.
+  denied by the AppArmor profile. Ubuntu 24.04 enables `apparmor_restrict_unprivileged_userns=1`,
+  which blocks `clone(CLONE_NEWUSER)` for all processes (even root) unless the AppArmor profile
+  includes `userns,`. The `infra-runner` profile grants this specifically so Buildah can create
+  user-namespaced working containers (OCI bundle setup) and runc-based RUN isolation.
+  `SYS_ADMIN` remains denied — `userns,` is an orthogonal AppArmor permission token, not a capability.
 - **The controller's GitHub credential never enters runner containers.** The controller
   holds either a GitHub App installation token (preferred, auto-refreshed every 55 min) or
   a static PAT. Runners receive only a short-lived registration token that expires after one use.
@@ -502,8 +506,12 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
 - **AppArmor profile** (`apparmor/infra-runner`) is applied to every runner container via
   `--security-opt apparmor=infra-runner`. It denies dangerous capabilities (`sys_module`,
   `sys_admin`, `net_raw`), raw/packet sockets, writes to kernel tunables and sysfs, and
-  access to host credential files. Load with `scripts/setup-apparmor.sh` before first start.
-  Set `RUNNER_APPARMOR_PROFILE=` (empty) in `.env` to disable.
+  access to host credential files. It explicitly grants `userns,` so Buildah can create
+  user namespaces for OCI bundle setup — Ubuntu 24.04's kernel-level restriction requires
+  this token even for root processes; `sys_admin` is still denied. Reload after any profile
+  edit with `sudo apparmor_parser -r apparmor/infra-runner`. Load fresh with
+  `scripts/setup-apparmor.sh` on first start. Set `RUNNER_APPARMOR_PROFILE=` (empty) in
+  `.env` to disable.
 - **Runner binary SHA256 is verified at build time.** `ARG RUNNER_SHA256` is checked with
   `sha256sum -c` before extraction. A mismatch fails the Docker build immediately.
 - **GitHub Actions in CI are SHA-pinned.** All `uses:` references in `deploy.yml` are pinned

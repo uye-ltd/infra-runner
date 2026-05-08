@@ -29,6 +29,12 @@ profile infra-runner flags=(attach_disconnected,mediate_deleted) {
   capability sys_chroot,
   capability audit_write,
 
+  # Required for buildah on Ubuntu 24.04: apparmor_restrict_unprivileged_userns=1
+  # blocks clone(CLONE_NEWUSER) unless the profile explicitly grants userns.
+  # Buildah needs this to create a user-namespaced working container (OCI bundle
+  # setup phase) and for runc-based isolation of RUN instructions.
+  userns,
+
   deny capability mac_admin,
   deny capability mac_override,
   deny capability net_admin,

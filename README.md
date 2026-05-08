@@ -16,12 +16,12 @@ docker-compose
 
 Per job (created and destroyed by the controller):
 ├── runner-net-{id}    isolated bridge network (10.89.x.x, egress-restricted)
-└── runner-job-{id}    ephemeral runner (Kaniko binary for image builds)
+└── runner-job-{id}    ephemeral runner (Buildah + fuse-overlayfs primary; Kaniko compat)
 ```
 
 **Controller** maintains a warm pool of idle runners (`DESIRED_IDLE`, default 2). When a runner picks up a job it exits. The controller tears down all per-job resources and spawns a replacement.
 
-**Runner containers** have no Docker socket and no privileged flag. Image builds use [Kaniko](https://github.com/GoogleContainerTools/kaniko), which builds from a Dockerfile in userspace without a daemon. The controller's credential (GitHub App token or PAT) never enters runner containers — only a short-lived, single-use registration token is injected at spawn time.
+**Runner containers** have no Docker socket and no privileged flag. Image builds use **Buildah** with **fuse-overlayfs** (daemonless, no `--privileged`). The `kaniko` binary is also present for backward compatibility. The controller's credential (GitHub App token or PAT) never enters runner containers — only a short-lived, single-use registration token is injected at spawn time.
 
 ---
 
@@ -30,14 +30,14 @@ Per job (created and destroyed by the controller):
 | Threat | Protection |
 |---|---|
 | Malicious job leaves persistent state | Container destroyed after every job (`--ephemeral`) |
-| Privileged container escape | No privileged flag — Kaniko builds in userspace, no DinD |
+| Privileged container escape | No privileged flag — Buildah + fuse-overlayfs builds in userspace, no DinD |
 | Credential theft | Controller credential (App token or PAT) stays in the controller; runners get only a short-lived registration token |
 | Docker socket abuse | Socket proxy allows only required API endpoints; `EXEC` and `BUILD` disabled on both proxies |
 | Supply chain / image tampering | cosign keyless signing in CI; deployer verifies signature before every pull; runner binary SHA256-verified at build time; CI actions pinned to commit SHAs |
 | Resource abuse (mining, DoS) | `--memory` and `--cpus` limits on every runner container; socket proxies capped at 128 MB / 0.25 CPU |
 | Network exfiltration / lateral movement | Egress policy: DNS + HTTPS only; private RFC 1918 ranges blocked |
 | Kernel-level container escape | `seccomp/runner-profile.json` blocks `mount`, `kexec_*`, `bpf`, kernel module syscalls |
-| File system / capability abuse | AppArmor profile denies `sys_admin`, `sys_module`, `net_raw`, sysfs writes, host credential reads |
+| File system / capability abuse | AppArmor profile denies `sys_admin`, `sys_module`, `net_raw`, sysfs writes, host credential reads; grants `userns` so Buildah can create user-namespaced build containers (Ubuntu 24.04 blocks `clone(CLONE_NEWUSER)` without this) |
 | Stranger PRs triggering jobs | GitHub setting: require approval for outside collaborators (see below) |
 
 ---
@@ -111,7 +111,7 @@ docker compose pull
 docker compose up -d
 
 # 4. Verify
-docker compose logs -f controller | jq .
+docker compose logs -f --no-log-prefix controller | jq .
 # → {"level":"info","svc":"controller","msg":"Runner is live","job_id":"..."}
 ```
 
@@ -175,8 +175,9 @@ Copy `.env.example` to `.env`. Exactly one auth path must be configured:
 
 ## Using the runner in a workflow
 
-There is no Docker daemon in the runner. Use `kaniko` for building and pushing images.
-`docker login` (credential storage only) still works for setting up registry auth.
+There is no Docker daemon in the runner. Use **Buildah** (primary) or `kaniko` (compat) for building and pushing images. `docker login` (credential storage only) still works for registry auth — both Buildah and Kaniko read `~/.docker/config.json`.
+
+**Buildah (recommended)**
 
 ```yaml
 jobs:
@@ -190,17 +191,29 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Log in to GHCR
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" \
-            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push with Kaniko
+      - name: Configure Buildah storage
         run: |
-          kaniko \
-            --context="${GITHUB_WORKSPACE}" \
-            --dockerfile="Dockerfile" \
-            --destination="ghcr.io/${{ github.repository_owner }}/myapp:latest" \
-            --destination="ghcr.io/${{ github.repository_owner }}/myapp:${{ github.sha }}"
+          printf '[storage]\n  driver = "overlay"\n  graphRoot = "/kaniko"\n  runRoot = "/tmp/buildah-run"\n\n[storage.options]\n\n  [storage.options.overlay]\n    mount_program = "/usr/bin/fuse-overlayfs"\n' \
+            > /etc/containers/storage.conf
+
+      - name: Build and push with Buildah
+        id: build
+        run: |
+          IMAGE=ghcr.io/${{ github.repository_owner }}/myapp
+          buildah build \
+            --tag "${IMAGE}:latest" \
+            --tag "${IMAGE}:${{ github.sha }}" \
+            --isolation=chroot \
+            .
+          buildah push --digestfile /tmp/digest.txt "${IMAGE}:latest"
+          buildah push "${IMAGE}:${{ github.sha }}"
+          echo "digest=$(cat /tmp/digest.txt)" >> "$GITHUB_OUTPUT"
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -208,19 +221,29 @@ jobs:
       - name: Sign image
         run: |
           cosign sign --yes \
-            "ghcr.io/${{ github.repository_owner }}/myapp:latest" \
-            "ghcr.io/${{ github.repository_owner }}/myapp:${{ github.sha }}"
+            "ghcr.io/${{ github.repository_owner }}/myapp@${{ steps.build.outputs.digest }}"
 ```
 
-`docker login` writes credentials to `~/.docker/config.json` (on a tmpfs inside the runner
-container). Kaniko and cosign both read from there automatically.
+Notes:
+- `--isolation=chroot` is required: Ubuntu 24.04's AppArmor profile grants `userns` for working-container setup, but chroot is used for `RUN` instruction execution as defence-in-depth.
+- Sign **by digest**, not by tag — tags are mutable; the deployer verifies by digest.
+- `graphRoot=/kaniko` reuses the controller-mounted tmpfs (`RUNNER_KANIKO_SIZE`, default `5g`). Increase if your image layers are large.
+- `runRoot=/tmp/buildah-run` is required when an explicit `graphRoot` is set (see storage.conf comment in the Configure step).
 
-Use `id-token: write` only if you are cosign-signing images (requires OIDC). Omit it for
-pure build+push workflows where no deployer verification is needed.
+**Kaniko (compat)**
 
-`--cleanup` removes extracted image layers after the build, keeping disk usage low.
-Kaniko's scratch space is limited to `RUNNER_KANIKO_SIZE` (default `5g`) via tmpfs.
-If you enable layer caching (`--cache`), add `--cache-ttl=1h` to prevent unbounded growth.
+```yaml
+      - name: Build and push with Kaniko
+        run: |
+          kaniko \
+            --context="${GITHUB_WORKSPACE}" \
+            --dockerfile="Dockerfile" \
+            --destination="ghcr.io/${{ github.repository_owner }}/myapp:latest" \
+            --destination="ghcr.io/${{ github.repository_owner }}/myapp:${{ github.sha }}" \
+            --cleanup
+```
+
+Use `id-token: write` only when cosign-signing (requires OIDC). Omit it for pure build+push.
 
 ### Prevent fork PRs from running with secrets
 
@@ -319,8 +342,8 @@ Point UptimeRobot, Grafana Synthetic Monitoring, or any HTTP monitor at this end
 Both services emit **newline-delimited JSON logs**:
 
 ```bash
-docker compose logs -f controller | jq .
-docker compose logs -f deployer   | jq .
+docker compose logs -f --no-log-prefix controller | jq .
+docker compose logs -f --no-log-prefix deployer   | jq .
 ```
 
 ---
@@ -329,8 +352,8 @@ docker compose logs -f deployer   | jq .
 
 ```bash
 # Follow logs
-docker compose logs -f controller | jq .
-docker compose logs -f deployer   | jq .
+docker compose logs -f --no-log-prefix controller | jq .
+docker compose logs -f --no-log-prefix deployer   | jq .
 
 # Check health
 curl -s http://localhost:8080/health | jq .
