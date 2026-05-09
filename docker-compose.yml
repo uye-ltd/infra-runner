@@ -92,6 +92,7 @@ services:
       - /root/.docker   # docker login writes here; ephemeral, never touches overlay fs
     volumes:
       - ./seccomp/runner-profile.json:/home/ghrunner/infra-runner/seccomp/runner-profile.json:ro
+      - /home/ghrunner/.ssh/github-app.pem:/run/secrets/github_app_key:ro
     healthcheck:
       test: ["CMD", "docker", "ps", "--filter", "label=runner-managed=true", "-q"]
       interval: 30s
@@ -125,6 +126,7 @@ services:
       - /root/.docker   # docker login writes here; ephemeral, never touches overlay fs
     volumes:
       - ./:/workspace:ro   # deployer reads compose file + .env to apply updates
+      - /home/ghrunner/.ssh/github-app.pem:/run/secrets/github_app_key:ro
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:${HEALTH_PORT:-8080}/health"]
       interval: 30s
