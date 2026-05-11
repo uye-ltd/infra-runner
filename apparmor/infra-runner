@@ -13,8 +13,6 @@
 profile infra-runner flags=(attach_disconnected,mediate_deleted) {
   # ---------------------------------------------------------------------------
   # Capabilities
-  # Allow what a root CI process legitimately needs for building and pushing
-  # images. Deny capabilities that affect the host beyond this container.
   # ---------------------------------------------------------------------------
 
   capability chown,
@@ -29,20 +27,38 @@ profile infra-runner flags=(attach_disconnected,mediate_deleted) {
   capability sys_chroot,
   capability audit_write,
 
+  # sys_ptrace: kernel proc_setgroups_open() calls ptrace_may_access() when the
+  # parent (buildah) and child are in different user namespaces. Without this,
+  # open(/proc/<child>/setgroups, O_WRONLY) returns EPERM before the kernel
+  # capability check even runs.
+  capability sys_ptrace,
+
+  # sys_admin: required to write full-range uid_map/gid_map entries
+  # (e.g. "0 0 4294967295") to /proc/<child>/uid_map during user namespace
+  # setup; kernel map_write() checks ns_capable(ns->parent, CAP_SYS_ADMIN)
+  # for large mappings in addition to CAP_SETUID.
+  capability sys_admin,
+
   # Required for buildah on Ubuntu 24.04: apparmor_restrict_unprivileged_userns=1
   # blocks clone(CLONE_NEWUSER) unless the profile explicitly grants userns.
-  # Buildah needs this to create a user-namespaced working container (OCI bundle
-  # setup phase) and for runc-based isolation of RUN instructions.
   userns,
+
+  # AppArmor ptrace mediation controls cross-process /proc/<pid>/ access
+  # independently of file path rules. Scoped to peer=infra-runner so only
+  # processes under this profile can ptrace each other.
+  ptrace (read, trace, readby, tracedby) peer=infra-runner,
+
+  # Inter-process signals within the same profile:
+  # - buildah's Go runtime sends SIGURG for async goroutine preemption (Go 1.14+)
+  # - GitHub Actions .NET runner uses SIGRTMIN+2 for thread-pool management
+  signal (send, receive) peer=infra-runner,
 
   deny capability mac_admin,
   deny capability mac_override,
   deny capability net_admin,
   deny capability net_raw,
-  deny capability sys_admin,
   deny capability sys_boot,
   deny capability sys_module,
-  deny capability sys_ptrace,
   deny capability sys_rawio,
   deny capability sys_time,
   deny capability syslog,
@@ -50,8 +66,6 @@ profile infra-runner flags=(attach_disconnected,mediate_deleted) {
 
   # ---------------------------------------------------------------------------
   # Network
-  # Allow TCP/UDP for git clone, Kaniko registry push, and API calls.
-  # Deny raw and packet sockets (used for crafting packets, ARP spoofing, etc.)
   # ---------------------------------------------------------------------------
 
   network inet  tcp,
@@ -60,6 +74,7 @@ profile infra-runner flags=(attach_disconnected,mediate_deleted) {
   network inet6 udp,
   network netlink raw,   # required by several system tools for interface queries
   network unix  stream,  # required by runner for internal IPC
+  network unix  dgram,   # required by buildah and container storage tools for IPC
 
   deny network raw,
   deny network packet,
@@ -69,8 +84,7 @@ profile infra-runner flags=(attach_disconnected,mediate_deleted) {
   # Broad access for CI, with explicit denials for sensitive host paths.
   # ---------------------------------------------------------------------------
 
-  # Allow everything by default — workflows need to read/write/exec broadly
-  /   r,        # .NET runtime walks up to root enumerating parent dirs
+  / rwlkmix,
   /** rwlkmix,
 
   # --- Kernel tunables and trigger files ---
@@ -108,10 +122,14 @@ profile infra-runner flags=(attach_disconnected,mediate_deleted) {
   deny /sbin/rmmod    x,
   deny /lib/modules/** w,
 
-  # --- fuse-overlayfs ---
-  # mount/umount2 are re-opened in seccomp for Buildah's fuse-overlayfs storage driver.
-  # AppArmor compensates by restricting mount to fstype=fuse.* only — kernel overlay,
-  # proc, sysfs, bind, and all other mount types remain implicitly denied.
-  mount fstype=fuse.*,
+  # ---------------------------------------------------------------------------
+  # Mounts
+  # buildah's chroot isolation combines bind + rbind + private + rprivate +
+  # remount + nosuid + noexec flags in a single syscall. AppArmor mount rules
+  # are flag-exact (no wildcard matching), so individual flag-combination rules
+  # cannot cover all cases. mount, (unrestricted) is necessary here; blast
+  # radius is contained by Docker's per-container mount namespace.
+  # ---------------------------------------------------------------------------
+  mount,
   umount,
 }

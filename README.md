@@ -37,7 +37,7 @@ Per job (created and destroyed by the controller):
 | Resource abuse (mining, DoS) | `--memory` and `--cpus` limits on every runner container; socket proxies capped at 128 MB / 0.25 CPU |
 | Network exfiltration / lateral movement | Egress policy: DNS + HTTPS only; private RFC 1918 ranges blocked |
 | Kernel-level container escape | `seccomp/runner-profile.json` blocks `mount`, `kexec_*`, `bpf`, kernel module syscalls |
-| File system / capability abuse | AppArmor profile denies `sys_admin`, `sys_module`, `net_raw`, sysfs writes, host credential reads; grants `userns` so Buildah can create user-namespaced build containers (Ubuntu 24.04 blocks `clone(CLONE_NEWUSER)` without this) |
+| File system / capability abuse | AppArmor profile grants `sys_ptrace` and `sys_admin` (required for buildah user-namespace setup: `proc_setgroups_open` calls `ptrace_may_access`, and full-range uid_map writes require `CAP_SYS_ADMIN`); grants `userns` (Ubuntu 24.04 blocks `clone(CLONE_NEWUSER)` without this); denies `sys_module`, `net_raw`, sysfs writes, kernel tunables, and host credential reads |
 | Stranger PRs triggering jobs | GitHub setting: require approval for outside collaborators (see below) |
 
 ---
@@ -226,6 +226,7 @@ jobs:
 
 Notes:
 - `--isolation=chroot` is required: Ubuntu 24.04's AppArmor profile grants `userns` for working-container setup, but chroot is used for `RUN` instruction execution as defence-in-depth.
+- Runner containers are spawned with `--cap-add SYS_PTRACE --cap-add SYS_ADMIN` — both are required for buildah's user-namespace setup path (the kernel's `proc_setgroups_open` calls `ptrace_may_access` across namespace boundaries, and writing full-range uid_map entries requires `CAP_SYS_ADMIN`). The AppArmor profile explicitly grants these capabilities rather than denying them.
 - Sign **by digest**, not by tag — tags are mutable; the deployer verifies by digest.
 - `graphRoot=/kaniko` reuses the controller-mounted tmpfs (`RUNNER_KANIKO_SIZE`, default `5g`). Increase if your image layers are large.
 - `runRoot=/tmp/buildah-run` is required when an explicit `graphRoot` is set (see storage.conf comment in the Configure step).

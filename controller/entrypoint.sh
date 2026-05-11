@@ -188,6 +188,8 @@ spawn_runner() {
     --cap-add FOWNER \
     --cap-add SETUID \
     --cap-add SETGID \
+    --cap-add SYS_PTRACE \
+    --cap-add SYS_ADMIN \
     "${seccomp_flag[@]}" \
     "${apparmor_flag[@]}" \
     --label runner-managed=true \

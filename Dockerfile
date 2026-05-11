@@ -33,10 +33,24 @@ COPY --from=ghcr.io/kaniko-build/dist/chainguard-forks-kaniko/executor:v1.25.14 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       buildah \
       fuse-overlayfs \
+      uidmap \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /etc/containers \
     && printf '[storage]\n  driver = "overlay"\n  graphRoot = "/kaniko"\n\n[storage.options]\n\n  [storage.options.overlay]\n    mount_program = "/usr/bin/fuse-overlayfs"\n' \
        > /etc/containers/storage.conf
+
+# Vault CLI — baked into the image because releases.hashicorp.com is geo-blocked
+# from the server hosting this runner. Install during image build (on GitHub hosted
+# runners) so validate.yml can use vault directly without network download at job time.
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://apt.releases.hashicorp.com/gpg \
+         | gpg --dearmor -o /etc/apt/keyrings/hashicorp.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/hashicorp.gpg] \
+         https://apt.releases.hashicorp.com $(lsb_release -cs) main" \
+         > /etc/apt/sources.list.d/hashicorp.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends vault \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/actions-runner
 
