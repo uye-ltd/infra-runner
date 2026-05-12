@@ -159,17 +159,23 @@ Copy `.env.example` to `.env`. Exactly one auth path must be configured:
 | `HEALTH_PORT` | no | `8080` | Port for the deployer health endpoint |
 | `CONTROLLER_POLL_INTERVAL` | no | `15` | Seconds between controller pool maintenance cycles |
 
-**Vault integration** (all optional — activate with `COMPOSE_FILE` below):
+**Plugin system** (all optional — each plugin activates via its own Compose overlay):
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `PLUGINS_DIR` | no | `/plugins/` | Container path scanned for `*.plugin` descriptor files each cycle |
+| `COMPOSE_FILE` | per-plugin | `docker-compose.yml` | Append plugin overlays, e.g. `docker-compose.yml:../infra-vault/docker-compose.infra-runner.yml` |
+
+Plugin-specific env vars (e.g. `VAULT_TOKEN`, `VAULT_ADDR`) are declared in `.env` and passed to post-deploy hook scripts via the deployer's environment. See `deployer/PLUGINS.md` for the descriptor format.
+
+**Vault plugin variables** (required when the vault-unseal plugin is active — see [Vault integration](#vault-integration)):
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `VAULT_COMPOSE_DIR` | yes (vault) | — | Absolute host path to infra-vault checkout |
-| `VAULT_CERT_IDENTITY` | yes (vault) | — | cosign cert identity for vault-unseal image signing |
 | `VAULT_TOKEN` | yes (vault) | — | Vault operator token for policy sync (server-side only) |
 | `VAULT_ADDR` | no | `http://vault:8200` | Vault address reachable on vault-net |
 | `VAULT_NET` | no | `vault-net` | Docker network Vault is on |
-| `VAULT_UNSEAL_IMAGE` | no | `ghcr.io/${GITHUB_ORG}/vault-unseal:latest` | Image ref to watch |
-| `COMPOSE_FILE` | vault activation | `docker-compose.yml` | Set to `docker-compose.yml:docker-compose.vault.yml` |
 
 ---
 
@@ -275,7 +281,7 @@ only what each workflow needs and set the org-level default to read-only:
 ## GitOps deploy flow
 
 ```
-push to main (infra-runner or infra-vault)
+push to main
   → CI builds images on self-hosted runner
   → CI pushes to GHCR with :latest and :sha tags
   → CI signs each image with cosign (keyless, OIDC-anchored to the workflow)
@@ -283,10 +289,9 @@ push to main (infra-runner or infra-vault)
       → new deployer image?      → verify sig → self-update → exit
       → new controller image?    → verify sig → docker compose up -d controller
       → always                   → verify runner sig → pre-pull for fast spawns
-      → new vault-unseal image?  → verify sig → docker compose up -d vault-unseal
-                                    (vault integration only — see below)
-      → always                   → apply vault/policies/*.hcl via short-lived vault container
-                                    (vault integration only; skipped if VAULT_TOKEN unset)
+      → for each *.plugin in /plugins/ (if any registered):
+          → new plugin image?    → verify sig → docker compose up -d <service>
+          → post-deploy hooks    → run: always | on_update; blocking: true | false
 ```
 
 A signature verification failure immediately sets `GET /health` to `503` and skips
@@ -296,34 +301,41 @@ the update — the currently running (verified) image stays in place.
 
 ## Vault integration
 
-The deployer can optionally manage a companion [infra-vault](https://github.com/uye-ltd/infra-vault) deployment on the same server: detecting new `vault-unseal` images, deploying them, and continuously syncing Vault policies — all without a deploy job in infra-vault's CI.
+The deployer manages a companion [infra-vault](https://github.com/uye-ltd/infra-vault) deployment via the plugin system: detecting new `vault-unseal` images, deploying them, and continuously syncing Vault policies — all without a deploy job in infra-vault's CI.
 
 ### Prerequisites
 
 - infra-vault already deployed on this server (`docker compose -f docker/docker-compose.yml up -d`)
 - `vault-unseal` GHCR package set to **public** (required for App installation token auth path)
+- infra-vault repo pulled on the server (the plugin descriptor and overlay live there)
 
 ### Setup
 
 ```bash
-# 1. Enable vault integration in .env:
+# 1. Pull infra-vault (if not already on the server):
+sudo -iu ghrunner git clone https://github.com/uye-ltd/infra-vault ~/infra-vault
+
+# 2. Add to infra-runner's .env:
 VAULT_COMPOSE_DIR=/home/ghrunner/infra-vault
 VAULT_TOKEN=hvs.XXXX                     # Vault operator token from `make init` output
 VAULT_ADDR=http://vault:8200
-VAULT_CERT_IDENTITY=https://github.com/uye-ltd/infra-vault/.github/workflows/deploy.yml@refs/heads/main
-COMPOSE_FILE=docker-compose.yml:docker-compose.vault.yml
+VAULT_NET=vault-net
+COMPOSE_FILE=docker-compose.yml:../infra-vault/docker-compose.infra-runner.yml
 
-# 2. Apply:
+# 3. Apply:
+cd ~/infra-runner
 docker compose up -d deployer
 ```
+
+The `docker-compose.infra-runner.yml` overlay in the infra-vault repo mounts the plugin descriptor and workspace into the deployer container.
 
 ### What the deployer does (every poll cycle)
 
 1. Checks GHCR for a new `vault-unseal` image digest
 2. If new: verifies cosign signature → `docker compose up -d vault-unseal`
-3. Always: applies `vault/policies/*.hcl` via a short-lived `hashicorp/vault` container on `vault-net`
+3. Always: runs `scripts/apply-policies.sh` in infra-vault, which applies `vault/policies/*.hcl` via a short-lived `hashicorp/vault` container on `vault-net`
 
-Policy sync is idempotent and runs every cycle — a policy-only commit to infra-vault takes effect within `POLL_INTERVAL` seconds without rebuilding the image.
+Policy sync is idempotent and runs every cycle — a policy-only commit to infra-vault takes effect within `POLL_INTERVAL` seconds without rebuilding the image. Hook failure is non-blocking (Vault may be sealed during startup).
 
 ---
 

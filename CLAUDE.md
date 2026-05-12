@@ -30,7 +30,8 @@ no SSH push from CI is required.
 ├── deployer/
 │   ├── Dockerfile                    # deployer image (ubuntu:24.04 + docker-ce-cli + compose + cosign + python3)
 │   ├── entrypoint.sh                 # GitOps loop: verify sig → pull → docker compose up -d
-│   └── health_server.py              # minimal Python HTTP server for GET /health
+│   ├── health_server.py              # minimal Python HTTP server for GET /health
+│   └── PLUGINS.md                    # plugin descriptor format reference + worked example
 ├── scripts/
 │   ├── ghcr-login.sh                 # refresh GHCR credentials on the host (sources github-app-token.sh; run before docker compose pull)
 │   ├── github-app-token.sh           # GitHub App JWT helper (sourced by controller + deployer): RS256 JWT → installation token
@@ -65,6 +66,7 @@ docker-compose (172.20.0.0/24 service space)
 └── deployer  (uye-deployer — 172.20.128.64/26)
     ├── DOCKER_HOST=tcp://deployer-proxy:2375  ← no direct socket mount
     ├── ./:/workspace:ro  ← reads docker-compose.yml + .env for docker compose up
+    ├── /plugins/*.plugin:ro  ← plugin descriptors (bind-mounted by plugin overlays)
     └── :HEALTH_PORT  ← GET /health endpoint
 
 Per job — created by controller, destroyed after job completes:
@@ -114,17 +116,24 @@ If `GITHUB_TOKEN` is set it is used as-is and the `GITHUB_APP_*` vars are ignore
 | `HEALTH_PORT` | no | `8080` | Deployer health endpoint port |
 | `CONTROLLER_POLL_INTERVAL` | no | `15` | Controller pool maintenance cycle interval (seconds) |
 
-**Vault integration** (all optional; enable by activating `docker-compose.vault.yml` overlay):
+**Plugin system** (all optional; each plugin activates via its own Compose overlay):
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `PLUGINS_DIR` | no | `/plugins/` | Container path scanned for `*.plugin` descriptor files each cycle |
+| `COMPOSE_FILE` | per-plugin | `docker-compose.yml` | Append plugin overlays, e.g. `docker-compose.yml:../infra-vault/docker-compose.infra-runner.yml` |
+
+Plugin-specific env vars (e.g. `VAULT_TOKEN`, `VAULT_ADDR`) are declared in `.env` and
+passed to post-deploy hook scripts via the deployer's inherited environment.
+
+**Vault plugin variables** (required when the vault-unseal plugin descriptor is active):
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | `VAULT_COMPOSE_DIR` | yes (vault) | — | Absolute host path to infra-vault checkout |
-| `VAULT_CERT_IDENTITY` | yes (vault) | — | cosign cert identity for vault-unseal CI workflow |
 | `VAULT_TOKEN` | yes (vault) | — | Vault operator token for policy sync (stays on server) |
 | `VAULT_ADDR` | no | `http://vault:8200` | Vault address reachable on vault-net |
 | `VAULT_NET` | no | `vault-net` | Docker network Vault is on |
-| `VAULT_UNSEAL_IMAGE` | no | `ghcr.io/${GITHUB_ORG}/vault-unseal:latest` | Full image ref to watch |
-| `COMPOSE_FILE` | vault activation | `docker-compose.yml` | Set to `docker-compose.yml:docker-compose.vault.yml` to add vault workspace mount |
 
 `RUNNER_IMAGE` and `DOCKER_HOST` are set in the Compose `environment` block (not `.env`)
 and must not be overridden there.
@@ -266,30 +275,30 @@ Poll loop (every POLL_INTERVAL seconds):
        (controller uses locally cached image on next spawn — never blocked on a pull)
      If NOT verified: set_unhealthy; local cache untouched
 
-  4. vault-unseal image (only when _VAULT_ENABLED=true):
-     pull_if_new(VAULT_UNSEAL_IMAGE)
-     If new image downloaded:
-       verify_image(VAULT_UNSEAL_IMAGE, VAULT_CERT_IDENTITY)  ← separate cert identity
-       If verified: docker compose --project-name infra-vault \
-                      --project-directory /workspace-vault up -d --no-deps vault-unseal
-       If compose fails: set_unhealthy
-       If NOT verified: set_unhealthy; skip
+  4. Plugin services — run_plugins():
+     For each *.plugin descriptor in PLUGINS_DIR (/plugins/ by default):
+       pull_if_new(PLUGIN_IMAGE)
+       If new image downloaded:
+         verify_image(PLUGIN_IMAGE, PLUGIN_CERT_IDENTITY)  ← per-plugin cert identity
+         If verified: docker compose --project-name PLUGIN_COMPOSE_PROJECT \
+                        --project-directory PLUGIN_COMPOSE_DIR \
+                        up -d --no-deps PLUGIN_COMPOSE_SERVICE
+         If compose fails: set_unhealthy
+         If NOT verified: set_unhealthy; skip
+       Post-deploy hooks (PLUGIN_POST_DEPLOY_N_*):
+         run: always   → execute every cycle regardless of image update
+         run: on_update → execute only when a new image was deployed
+         blocking: false → failure = log warn only, does NOT set_unhealthy
 
-  5. Vault policy sync (every cycle, idempotent; skipped if VAULT_TOKEN unset):
-     docker run --rm --network VAULT_NET hashicorp/vault:1.17
-       (short-lived container on vault-net — Docker resolves bind-mount path on the HOST)
-       For each vault/policies/*.hcl: vault policy write <name> <file>
-     Failure is logged as a warning (Vault may be sealed); does NOT set_unhealthy
-
-  6. set_healthy()  ← clears any transient error state from this cycle
+  5. set_healthy()  ← clears any transient error state from this cycle
        Skipped if runner image pull failed (preserves unhealthy state)
 
-  7. sleep POLL_INTERVAL
+  6. sleep POLL_INTERVAL
 ```
 
 `verify_image(image [cert_identity])` calls `cosign verify --certificate-identity <cert_identity> --certificate-oidc-issuer <token.actions.githubusercontent.com>`.
 The second argument defaults to `$CERT_IDENTITY` (infra-runner's own workflow identity) when omitted.
-vault-unseal passes `$VAULT_CERT_IDENTITY` explicitly (infra-vault's workflow identity).
+Plugin descriptors pass `$PLUGIN_CERT_IDENTITY` explicitly (the external project's workflow identity).
 Signature failures are immediately written to `/tmp/health` (atomically via `.tmp` + `mv`) and logged at `error` level.
 Pull failures are logged as warnings and set the health endpoint to unhealthy.
 
@@ -331,10 +340,10 @@ Pull failures are logged as warnings and set the health endpoint to unhealthy.
 
 **No named volumes** — the controller creates no volumes in the current architecture.
 
-**`docker-compose.vault.yml`** — optional overlay (activated by setting `COMPOSE_FILE` in `.env`).
-Extends the deployer service with `${VAULT_COMPOSE_DIR}:/workspace-vault:ro` so the deployer can
-run `docker compose --project-directory /workspace-vault up -d vault-unseal`. The base
-`docker-compose.yml` is unchanged; vault integration is strictly opt-in.
+**Plugin overlays** — external projects ship their own `docker-compose.infra-runner.yml` that
+extends the deployer service with the mounts their plugin needs (the `*.plugin` descriptor file
+and their compose workspace). Activated by appending the overlay path to `COMPOSE_FILE` in `.env`.
+The base `docker-compose.yml` is unchanged; each plugin is strictly opt-in.
 
 ---
 
