@@ -37,7 +37,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /etc/containers \
     && printf '[storage]\n  driver = "overlay"\n  graphRoot = "/kaniko"\n\n[storage.options]\n\n  [storage.options.overlay]\n    mount_program = "/usr/bin/fuse-overlayfs"\n' \
-       > /etc/containers/storage.conf
+       > /etc/containers/storage.conf \
+    && echo "root:0:4294967295" > /etc/subuid \
+    && echo "root:0:4294967295" > /etc/subgid
 
 # Vault CLI — baked into the image because releases.hashicorp.com is geo-blocked
 # from the server hosting this runner. Install during image build (on GitHub hosted
