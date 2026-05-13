@@ -91,7 +91,7 @@ services:
     tmpfs:
       - /root/.docker   # docker login writes here; ephemeral, never touches overlay fs
     volumes:
-      - ./seccomp/runner-profile.json:/home/ghrunner/infra-runner/seccomp/runner-profile.json:ro
+      - ${COMPOSE_PROJECT_DIR}/seccomp/runner-profile.json:/home/ghrunner/infra-runner/seccomp/runner-profile.json:ro
       - /home/ghrunner/.ssh/github-app.pem:/run/secrets/github_app_key:ro
     healthcheck:
       test: ["CMD", "docker", "ps", "--filter", "label=runner-managed=true", "-q"]

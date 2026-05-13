@@ -48,10 +48,16 @@ profile infra-runner flags=(attach_disconnected,mediate_deleted) {
   # processes under this profile can ptrace each other.
   ptrace (read, trace, readby, tracedby) peer=infra-runner,
 
-  # Inter-process signals within the same profile:
+  # Signals FROM this profile: restricted to peers also under infra-runner so
+  # container code cannot signal arbitrary host processes.
+  signal send peer=infra-runner,
+
+  # Signals TO this profile: allow dockerd and runc to deliver lifecycle signals
+  # (SIGTERM on docker stop, SIGKILL on docker rm -f / timeout). Without this,
+  # AppArmor v8 blocks SIGKILL from unconfined/runc peers at the receiver side.
   # - buildah's Go runtime sends SIGURG for async goroutine preemption (Go 1.14+)
   # - GitHub Actions .NET runner uses SIGRTMIN+2 for thread-pool management
-  signal (send, receive) peer=infra-runner,
+  signal receive,
 
   deny capability mac_admin,
   deny capability mac_override,
