@@ -55,6 +55,19 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && apt-get install -y --no-install-recommends vault \
     && rm -rf /var/lib/apt/lists/*
 
+# Cosign — baked in because the self-hosted server's SSL connection to
+# github.com/releases times out during job execution; image builds run on
+# GitHub-hosted runners where the connection succeeds. Same pattern as Vault.
+# Version pinned; bump here when bumping cosign-release in vault's ci.yml.
+RUN curl -fsSL \
+      "https://github.com/sigstore/cosign/releases/download/v2.2.4/cosign-linux-amd64" \
+      -o /usr/local/bin/cosign \
+    && curl -fsSL \
+      "https://github.com/sigstore/cosign/releases/download/v2.2.4/cosign_checksums.txt" \
+    | grep ' cosign-linux-amd64$' \
+    | sha256sum -c - \
+    && chmod +x /usr/local/bin/cosign
+
 WORKDIR /opt/actions-runner
 
 # Download, verify SHA256, and extract GitHub Actions runner binary
