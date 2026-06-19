@@ -59,14 +59,16 @@ RUN install -m 0755 -d /etc/apt/keyrings \
 # github.com/releases times out during job execution; image builds run on
 # GitHub-hosted runners where the connection succeeds. Same pattern as Vault.
 # Version pinned; bump here when bumping cosign-release in vault's ci.yml.
-RUN curl -fsSL \
+RUN cd /tmp \
+    && curl -fsSL \
       "https://github.com/sigstore/cosign/releases/download/v2.2.4/cosign-linux-amd64" \
-      -o /usr/local/bin/cosign \
+      -o cosign-linux-amd64 \
     && curl -fsSL \
       "https://github.com/sigstore/cosign/releases/download/v2.2.4/cosign_checksums.txt" \
     | grep ' cosign-linux-amd64$' \
     | sha256sum -c - \
-    && chmod +x /usr/local/bin/cosign
+    && install -m 0755 cosign-linux-amd64 /usr/local/bin/cosign \
+    && rm cosign-linux-amd64
 
 WORKDIR /opt/actions-runner
 
