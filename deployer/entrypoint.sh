@@ -306,6 +306,8 @@ while true; do
           [[ -n "${_new_id}" ]] && break
           sleep 1
         done
+        # Release port 8080 before starting replacement — new container needs it.
+        kill "${HEALTH_SERVER_PID}" 2>/dev/null || true
         if [[ -n "${_new_id}" ]]; then
           docker start "${_new_id}" 2>/dev/null \
             && log info "Started replacement container" id "${_new_id}" \
@@ -313,7 +315,6 @@ while true; do
         else
           log warn "Self-update: no replacement container found — may need manual start"
         fi
-        kill "${HEALTH_SERVER_PID}" 2>/dev/null || true
         exit 0
       ' SIGTERM
       "${COMPOSE[@]}" up -d --no-deps deployer &
