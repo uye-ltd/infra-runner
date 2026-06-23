@@ -6,7 +6,7 @@
 # before applying the change via docker compose.
 #
 # Update order:
-#   1. deployer itself  (verify → pull → compose up -d in background → start replacement → exit)
+#   1. deployer itself  (verify → pull → override SIGTERM trap → compose up -d in bg → trap starts replacement → exit)
 #   2. controller       (verify → docker compose up -d controller)
 #   3. runner image     (verify remote sig → pull)
 #   4. plugins          (for each *.plugin in PLUGINS_DIR: verify → pull → compose up → hooks)
@@ -285,25 +285,33 @@ while true; do
   if pull_if_new "${DEPLOYER_IMAGE}"; then
     if verify_image "${DEPLOYER_IMAGE}"; then
       log info "New deployer image verified — self-updating"
-      # Compose creates the replacement container before stopping this one, then
-      # sends docker-stop (SIGTERM → 10 s timeout → SIGKILL) to us. SIGKILL kills
-      # PID 1 and all children — including the compose subprocess — before compose
-      # can issue the start command. Run compose in the background and race it:
-      # poll until the new container appears in "created" state, start it ourselves,
-      # then wait for the inevitable SIGKILL.
-      "${COMPOSE[@]}" up -d --no-deps deployer &
-      _new_id=""
-      for _ in $(seq 1 20); do
-        sleep 0.5
+      # Compose creates the replacement container BEFORE sending docker-stop to
+      # this one. docker-stop delivers SIGTERM to PID 1 (us). With compose running
+      # as a foreground subprocess SIGTERM would be deferred until compose exits
+      # (never — compose is waiting for us to stop), so Docker SIGKILLs us after
+      # the 10 s stop-timeout, killing the compose subprocess too, and the new
+      # container is left in "Created" — never started.
+      #
+      # Fix: run compose in the background (bash is now free to receive SIGTERM),
+      # and override the SIGTERM trap so that when docker-stop fires it, we find
+      # the already-created replacement and start it before shutting down.
+      trap '
         _new_id=$(docker ps -aq \
           --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
           --filter "label=com.docker.compose.service=deployer" \
           --filter "ancestor=$(image_id "${DEPLOYER_IMAGE}")" \
           --filter "status=created" 2>/dev/null | head -1)
-        [[ -n "${_new_id}" ]] && { docker start "${_new_id}" 2>/dev/null; break; }
-      done
-      [[ -z "${_new_id}" ]] \
-        && log warn "Self-update: replacement container not found within 10 s — may need manual start"
+        if [[ -n "${_new_id}" ]]; then
+          docker start "${_new_id}" 2>/dev/null \
+            && log info "Started replacement container" id "${_new_id}" \
+            || log warn "Failed to start replacement container" id "${_new_id}"
+        else
+          log warn "Self-update: no replacement container found at SIGTERM — may need manual start"
+        fi
+        kill "${HEALTH_SERVER_PID}" 2>/dev/null || true
+        exit 0
+      ' SIGTERM
+      "${COMPOSE[@]}" up -d --no-deps deployer &
       wait 2>/dev/null || true
       exit 0
     fi
