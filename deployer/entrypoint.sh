@@ -307,7 +307,9 @@ while true; do
           sleep 1
         done
         # Release port 8080 before starting replacement — new container needs it.
+        # wait ensures the socket is fully closed before docker start binds it.
         kill "${HEALTH_SERVER_PID}" 2>/dev/null || true
+        wait "${HEALTH_SERVER_PID}" 2>/dev/null || true
         if [[ -n "${_new_id}" ]]; then
           docker start "${_new_id}" 2>/dev/null \
             && log info "Started replacement container" id "${_new_id}" \
