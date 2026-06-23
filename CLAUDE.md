@@ -547,3 +547,8 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
 - **The `.env` file and any mounted PEM key contain secrets — both are gitignored. Never commit them.**
 - **Remaining open threats:** proxy containers have full socket access (mitigated by being
   minimal and versioned); `$GITHUB_WORKSPACE` disk is unconstrained.
+
+## Insights
+- The ancestor= filter in the polling loop is what prevents false positives: it only matches containers created from  
+  the newly pulled image digest, so any leftover "Created" containers from previous failed self-updates (using older    
+  image IDs) are invisible to the poll.                                                                                 
