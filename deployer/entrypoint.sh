@@ -296,17 +296,22 @@ while true; do
       # and override the SIGTERM trap so that when docker-stop fires it, we find
       # the already-created replacement and start it before shutting down.
       trap '
-        _new_id=$(docker ps -aq \
-          --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
-          --filter "label=com.docker.compose.service=deployer" \
-          --filter "ancestor=$(image_id "${DEPLOYER_IMAGE}")" \
-          --filter "status=created" 2>/dev/null | head -1)
+        _new_id=""
+        for _ in $(seq 1 8); do
+          _new_id=$(docker ps -aq \
+            --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
+            --filter "label=com.docker.compose.service=deployer" \
+            --filter "ancestor=$(image_id "${DEPLOYER_IMAGE}")" \
+            --filter "status=created" 2>/dev/null | head -1)
+          [[ -n "${_new_id}" ]] && break
+          sleep 1
+        done
         if [[ -n "${_new_id}" ]]; then
           docker start "${_new_id}" 2>/dev/null \
             && log info "Started replacement container" id "${_new_id}" \
             || log warn "Failed to start replacement container" id "${_new_id}"
         else
-          log warn "Self-update: no replacement container found at SIGTERM — may need manual start"
+          log warn "Self-update: no replacement container found — may need manual start"
         fi
         kill "${HEALTH_SERVER_PID}" 2>/dev/null || true
         exit 0
