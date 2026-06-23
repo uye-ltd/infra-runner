@@ -546,4 +546,4 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
   verification failure or compose error. Poll with UptimeRobot, Grafana, etc.
 - **The `.env` file and any mounted PEM key contain secrets — both are gitignored. Never commit them.**
 - **Remaining open threats:** proxy containers have full socket access (mitigated by being
-  minimal and versioned); `$GITHUB_WORKSPACE` disk is unconstrained.
+  minimal and versioned); `$GITHUB_WORKSPACE` disk is unconstrained. 
