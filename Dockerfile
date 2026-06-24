@@ -3,6 +3,9 @@ FROM ubuntu:24.04
 ARG RUNNER_VERSION=2.334.0
 ARG RUNNER_SHA256=048024cd2c848eb6f14d5646d56c13a4def2ae7ee3ad12122bee960c56f3d271
 
+ARG VAULT_VERSION=1.19.2
+ARG VAULT_SHA256=c6781c3e0ec431f39bcc8f1443d09f3b8944c90c348e91aa13182b4e1fd2797f
+
 # System dependencies + Docker CLI (for `docker login` — no daemon needed for credential storage)
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl \
@@ -45,15 +48,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Vault CLI — baked into the image because releases.hashicorp.com is geo-blocked
 # from the server hosting this runner. Install during image build (on GitHub hosted
 # runners) so validate.yml can use vault directly without network download at job time.
-RUN install -m 0755 -d /etc/apt/keyrings \
-    && curl -fsSL https://apt.releases.hashicorp.com/gpg \
-         | gpg --dearmor -o /etc/apt/keyrings/hashicorp.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/hashicorp.gpg] \
-         https://apt.releases.hashicorp.com $(lsb_release -cs) main" \
-         > /etc/apt/sources.list.d/hashicorp.list \
-    && apt-get update -o Acquire::Retries=3 \
-    && apt-get install -y --no-install-recommends vault \
-    && rm -rf /var/lib/apt/lists/*
+# Direct binary download avoids the HashiCorp APT CDN (prone to mirror-sync failures).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends unzip \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL \
+      "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip" \
+      -o /tmp/vault.zip \
+    && echo "${VAULT_SHA256}  /tmp/vault.zip" | sha256sum -c - \
+    && unzip -j /tmp/vault.zip vault -d /usr/local/bin/ \
+    && chmod +x /usr/local/bin/vault \
+    && rm /tmp/vault.zip
 
 # Cosign — baked in because the self-hosted server's SSL connection to
 # github.com/releases times out during job execution; image builds run on
