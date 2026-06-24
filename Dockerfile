@@ -51,7 +51,7 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/hashicorp.gpg] \
          https://apt.releases.hashicorp.com $(lsb_release -cs) main" \
          > /etc/apt/sources.list.d/hashicorp.list \
-    && apt-get update \
+    && apt-get update -o Acquire::Retries=3 \
     && apt-get install -y --no-install-recommends vault \
     && rm -rf /var/lib/apt/lists/*
 
