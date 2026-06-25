@@ -1,4 +1,4 @@
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 # System dependencies:
 #   curl + jq  — GitHub API calls and JSON parsing in entrypoint.sh
