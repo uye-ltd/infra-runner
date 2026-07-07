@@ -175,12 +175,13 @@ verify_image() {
 # because that image is already present locally, compose does not re-pull it, so
 # the helper needs no GHCR/GitHub credentials. It reaches the Docker API through
 # the same socket proxy (deployer-proxy). It mounts the project dir's PARENT at its real
-# path (not a fixed /workspace) and runs compose from the real project dir, so that compose
-# reads COMPOSE_FILE from the project .env AND any relative plugin-overlay paths in it — e.g.
-# ../infra-vault/docker-compose.infra-runner.yml — resolve. Without this, once a plugin
-# overlay is appended to COMPOSE_FILE, the helper's compose can't find the sibling overlay
-# file, errors out, and the self-update silently times out (and, had it recreated, would have
-# dropped the plugin's volume mounts).
+# path (not a fixed /workspace) and runs with its working directory (-w) set to the real
+# project dir, so that compose reads COMPOSE_FILE from the project .env and resolves BOTH the
+# relative entries in COMPOSE_FILE (which are relative to the working directory, not
+# --project-directory) AND sibling plugin-overlay paths like ../infra-vault/docker-compose.infra-runner.yml.
+# Without this, once a plugin overlay is appended to COMPOSE_FILE, the helper's compose can't
+# find the compose files, errors out, and the self-update silently times out (and, had it
+# recreated, would have dropped the plugin's volume mounts).
 start_self_update_helper() {
   local proxy_net="${COMPOSE_PROJECT_NAME}_deployer-proxy-net"
   local parent_dir; parent_dir="$(dirname "${COMPOSE_PROJECT_DIR}")"
@@ -193,6 +194,7 @@ start_self_update_helper() {
        -e DOCKER_HOST=tcp://deployer-proxy:2375 \
        -e COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME}" \
        -v "${parent_dir}:${parent_dir}:ro" \
+       -w "${COMPOSE_PROJECT_DIR}" \
        --label runner-managed=true \
        --label role=deployer-selfupdate \
        --entrypoint /bin/bash \
