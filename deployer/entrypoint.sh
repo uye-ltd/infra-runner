@@ -6,10 +6,20 @@
 # before applying the change via docker compose.
 #
 # Update order:
-#   1. deployer itself  (verify → pull → override SIGTERM trap → compose up -d in bg → trap starts replacement → exit)
+#   1. deployer itself  (verify → launch external helper container → helper runs
+#                        `compose up -d --no-deps deployer` from OUTSIDE our lifecycle →
+#                        compose recreates us cleanly → we exit via shutdown() trap)
 #   2. controller       (verify → docker compose up -d controller)
 #   3. runner image     (verify remote sig → pull)
 #   4. plugins          (for each *.plugin in PLUGINS_DIR: verify → pull → compose up → hooks)
+#
+# Self-update note: a process INSIDE a container cannot watch `docker compose` finish
+# recreating that same container — compose stops the old container (killing the compose
+# process with it) before it has attached every network to the replacement, leaving the
+# new deployer missing `deployer-proxy-net` and unable to reach its socket proxy (a
+# self-update deadlock). We therefore delegate the recreate to a short-lived sibling
+# "helper" container that runs compose from outside our lifecycle; compose then completes
+# the full create → attach-all-networks → stop-old → start-new sequence normally.
 #
 # Health endpoint: GET http://<host>:HEALTH_PORT/health
 #   200 {"status":"ok",...}  or  503 {"status":"unhealthy","reason":"..."}
@@ -21,6 +31,11 @@ COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME is required}"
 POLL_INTERVAL="${POLL_INTERVAL:-60}"
 HEALTH_FILE="${HEALTH_FILE:-/tmp/health}"
 HEALTH_PORT="${HEALTH_PORT:-8080}"
+# Max time to wait for the self-update helper to recreate this container before
+# giving up and resuming normal operation (so a failed helper cannot deadlock us).
+SELF_UPDATE_TIMEOUT="${SELF_UPDATE_TIMEOUT:-120}"
+# Fixed name for the sibling helper container that performs the self-update recreate.
+HELPER_NAME="${COMPOSE_PROJECT_NAME}-deployer-selfupdate"
 
 CONTROLLER_IMAGE="ghcr.io/${GITHUB_ORG}/infra-runner-controller:latest"
 RUNNER_IMAGE="ghcr.io/${GITHUB_ORG}/infra-runner:latest"
@@ -150,6 +165,43 @@ verify_image() {
 }
 
 # ---------------------------------------------------------------------------
+# Self-update — delegated to an external sibling helper container
+# ---------------------------------------------------------------------------
+# We cannot recreate ourselves from within: `docker compose up` stops this
+# container mid-recreate (killing the compose process before it finishes
+# attaching every network to the replacement). Instead we launch a short-lived
+# helper that runs the same compose command from OUTSIDE our lifecycle. The
+# helper reuses the already-pulled deployer image (it ships docker-compose-plugin);
+# because that image is already present locally, compose does not re-pull it, so
+# the helper needs no GHCR/GitHub credentials. It reaches the Docker API through
+# the same socket proxy (deployer-proxy) and reads the compose files + .env from
+# the read-only /workspace bind mount.
+start_self_update_helper() {
+  local proxy_net="${COMPOSE_PROJECT_NAME}_deployer-proxy-net"
+  # Clear any leftover helper from a previous attempt (kept until now for post-mortem).
+  docker rm -f "${HELPER_NAME}" >/dev/null 2>&1 || true
+  log info "Launching self-update helper" name "${HELPER_NAME}" image "${DEPLOYER_IMAGE}"
+  if docker run -d \
+       --name "${HELPER_NAME}" \
+       --network "${proxy_net}" \
+       -e DOCKER_HOST=tcp://deployer-proxy:2375 \
+       -e COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME}" \
+       -v "${COMPOSE_PROJECT_DIR}:/workspace:ro" \
+       --label runner-managed=true \
+       --label role=deployer-selfupdate \
+       --entrypoint /bin/bash \
+       "${DEPLOYER_IMAGE}" \
+       -c 'set -e; exec docker compose --project-name "'"${COMPOSE_PROJECT_NAME}"'" \
+             --project-directory /workspace up -d --no-deps deployer' \
+       >/dev/null 2>&1; then
+    return 0
+  fi
+  log error "Failed to launch self-update helper" name "${HELPER_NAME}"
+  set_unhealthy "Failed to launch self-update helper"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Plugin system — generic drop-in deployer
 # ---------------------------------------------------------------------------
 # Scans PLUGINS_DIR for *.plugin descriptor files and applies image updates.
@@ -272,6 +324,11 @@ shutdown() {
 }
 trap shutdown SIGTERM SIGINT
 
+# Remove any self-update helper left over from a previous update cycle. If we are
+# running, a prior helper (if any) has already done its job; this keeps an exited
+# helper container from lingering indefinitely.
+docker rm -f "${HELPER_NAME}" >/dev/null 2>&1 || true
+
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
@@ -284,44 +341,24 @@ while true; do
   # -------------------------------------------------------------------------
   if pull_if_new "${DEPLOYER_IMAGE}"; then
     if verify_image "${DEPLOYER_IMAGE}"; then
-      log info "New deployer image verified — self-updating"
-      # Compose creates the replacement container BEFORE sending docker-stop to
-      # this one. docker-stop delivers SIGTERM to PID 1 (us). With compose running
-      # as a foreground subprocess SIGTERM would be deferred until compose exits
-      # (never — compose is waiting for us to stop), so Docker SIGKILLs us after
-      # the 10 s stop-timeout, killing the compose subprocess too, and the new
-      # container is left in "Created" — never started.
-      #
-      # Fix: run compose in the background (bash is now free to receive SIGTERM),
-      # and override the SIGTERM trap so that when docker-stop fires it, we find
-      # the already-created replacement and start it before shutting down.
-      trap '
-        _new_id=""
-        for _ in $(seq 1 8); do
-          _new_id=$(docker ps -aq \
-            --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
-            --filter "label=com.docker.compose.service=deployer" \
-            --filter "ancestor=$(image_id "${DEPLOYER_IMAGE}")" \
-            --filter "status=created" 2>/dev/null | head -1)
-          [[ -n "${_new_id}" ]] && break
-          sleep 1
+      log info "New deployer image verified — self-updating via external helper"
+      if start_self_update_helper; then
+        # We are now a passive participant. The helper runs
+        # `compose up -d --no-deps deployer` from OUTSIDE our lifecycle, so compose
+        # completes the full recreate (create → attach ALL networks → stop old →
+        # start new). When it stops us, the shutdown() SIGTERM trap exits cleanly
+        # and compose starts the replacement. If we are still alive after the grace
+        # window the helper failed; carry on managing the other services rather
+        # than deadlocking (do NOT exit — the loop continues below).
+        _waited=0
+        while (( _waited < SELF_UPDATE_TIMEOUT )); do
+          sleep 3
+          _waited=$(( _waited + 3 ))
         done
-        # Release port 8080 before starting replacement — new container needs it.
-        # wait ensures the socket is fully closed before docker start binds it.
-        kill "${HEALTH_SERVER_PID}" 2>/dev/null || true
-        wait "${HEALTH_SERVER_PID}" 2>/dev/null || true
-        if [[ -n "${_new_id}" ]]; then
-          docker start "${_new_id}" 2>/dev/null \
-            && log info "Started replacement container" id "${_new_id}" \
-            || log warn "Failed to start replacement container" id "${_new_id}"
-        else
-          log warn "Self-update: no replacement container found — may need manual start"
-        fi
-        exit 0
-      ' SIGTERM
-      "${COMPOSE[@]}" up -d --no-deps deployer &
-      wait 2>/dev/null || true
-      exit 0
+        log warn "Self-update helper did not replace deployer in time — continuing" \
+          timeout_s "${SELF_UPDATE_TIMEOUT}"
+        set_unhealthy "Self-update helper did not replace deployer within ${SELF_UPDATE_TIMEOUT}s"
+      fi
     fi
   fi
 
