@@ -117,7 +117,10 @@ PLUGIN_NAME=vault-unseal
 PLUGIN_IMAGE=ghcr.io/${GITHUB_ORG}/vault-unseal:latest
 PLUGIN_CERT_IDENTITY=${VAULT_CERT_IDENTITY}
 PLUGIN_COMPOSE_PROJECT=infra-vault
-PLUGIN_COMPOSE_DIR=/workspace-vault
+# docker/ subdir: holds docker-compose.yml and (on the server) .env. The deployer runs
+# `docker compose --project-directory <this>` with no -f/--env-file, so the compose file
+# and docker/.env (VAULT_UNSEAL_KEY) must both live here.
+PLUGIN_COMPOSE_DIR=/workspace-vault/docker
 PLUGIN_COMPOSE_SERVICE=vault-unseal
 
 PLUGIN_POST_DEPLOY_0_SCRIPT=scripts/apply-policies.sh
@@ -138,9 +141,13 @@ services:
 **infra-runner `.env` additions:**
 
 ```bash
-COMPOSE_FILE=docker-compose.yml:../infra-vault/docker-compose.infra-runner.yml
+# Once COMPOSE_FILE is set, Compose stops auto-discovering docker-compose.override.yml —
+# list every file you rely on explicitly.
+COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:../infra-vault/docker-compose.infra-runner.yml
 VAULT_COMPOSE_DIR=/home/ghrunner/infra-vault
-VAULT_CERT_IDENTITY=https://github.com/uye-ltd/infra-vault/.github/workflows/deploy.yml@refs/heads/main
+# The vault-unseal image is signed by infra-vault's ci.yml (the build+sign job lives there),
+# so the cosign identity is ci.yml — NOT deploy.yml.
+VAULT_CERT_IDENTITY=https://github.com/uye-ltd/infra-vault/.github/workflows/ci.yml@refs/heads/main
 VAULT_TOKEN=hvs.XXXX
 VAULT_ADDR=http://vault:8200
 VAULT_NET=vault-net
