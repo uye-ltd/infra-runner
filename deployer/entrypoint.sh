@@ -174,10 +174,16 @@ verify_image() {
 # helper reuses the already-pulled deployer image (it ships docker-compose-plugin);
 # because that image is already present locally, compose does not re-pull it, so
 # the helper needs no GHCR/GitHub credentials. It reaches the Docker API through
-# the same socket proxy (deployer-proxy) and reads the compose files + .env from
-# the read-only /workspace bind mount.
+# the same socket proxy (deployer-proxy). It mounts the project dir's PARENT at its real
+# path (not a fixed /workspace) and runs compose from the real project dir, so that compose
+# reads COMPOSE_FILE from the project .env AND any relative plugin-overlay paths in it — e.g.
+# ../infra-vault/docker-compose.infra-runner.yml — resolve. Without this, once a plugin
+# overlay is appended to COMPOSE_FILE, the helper's compose can't find the sibling overlay
+# file, errors out, and the self-update silently times out (and, had it recreated, would have
+# dropped the plugin's volume mounts).
 start_self_update_helper() {
   local proxy_net="${COMPOSE_PROJECT_NAME}_deployer-proxy-net"
+  local parent_dir; parent_dir="$(dirname "${COMPOSE_PROJECT_DIR}")"
   # Clear any leftover helper from a previous attempt (kept until now for post-mortem).
   docker rm -f "${HELPER_NAME}" >/dev/null 2>&1 || true
   log info "Launching self-update helper" name "${HELPER_NAME}" image "${DEPLOYER_IMAGE}"
@@ -186,13 +192,13 @@ start_self_update_helper() {
        --network "${proxy_net}" \
        -e DOCKER_HOST=tcp://deployer-proxy:2375 \
        -e COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME}" \
-       -v "${COMPOSE_PROJECT_DIR}:/workspace:ro" \
+       -v "${parent_dir}:${parent_dir}:ro" \
        --label runner-managed=true \
        --label role=deployer-selfupdate \
        --entrypoint /bin/bash \
        "${DEPLOYER_IMAGE}" \
        -c 'set -e; exec docker compose --project-name "'"${COMPOSE_PROJECT_NAME}"'" \
-             --project-directory /workspace up -d --no-deps deployer' \
+             --project-directory "'"${COMPOSE_PROJECT_DIR}"'" up -d --no-deps deployer' \
        >/dev/null 2>&1; then
     return 0
   fi
