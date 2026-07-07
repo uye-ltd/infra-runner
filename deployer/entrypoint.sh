@@ -44,7 +44,14 @@ DEPLOYER_IMAGE="ghcr.io/${GITHUB_ORG}/uye-deployer:latest"
 CERT_IDENTITY="https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/.github/workflows/deploy.yml@refs/heads/main"
 CERT_OIDC_ISSUER="https://token.actions.githubusercontent.com"
 
-COMPOSE=(docker compose --project-name "${COMPOSE_PROJECT_NAME}" --project-directory /workspace)
+# Pin infra-runner's own base compose files with container-absolute paths (the project dir is
+# bind-mounted at /workspace) so this array is unaffected by COMPOSE_FILE. Once a plugin is
+# active, COMPOSE_FILE includes sibling overlay paths like ../infra-vault/docker-compose.infra-runner.yml
+# that the deployer can't resolve from its /workspace bind mount — leaving it in would break the
+# controller update. Plugins are handled separately in run_plugins; the deployer recreates
+# ITSELF via the self-update helper, so this array only ever updates the controller.
+COMPOSE=(docker compose --project-name "${COMPOSE_PROJECT_NAME}" --project-directory /workspace -f /workspace/docker-compose.yml)
+[[ -f /workspace/docker-compose.override.yml ]] && COMPOSE+=(-f /workspace/docker-compose.override.yml)
 
 PLUGINS_DIR="${PLUGINS_DIR:-/plugins/}"
 
