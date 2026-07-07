@@ -276,7 +276,11 @@ run_plugins() {
       if verify_image "${PLUGIN_IMAGE}" "${PLUGIN_CERT_IDENTITY}"; then
         log info "New plugin image verified — updating service" \
           plugin "${PLUGIN_NAME}" service "${PLUGIN_COMPOSE_SERVICE}"
-        if docker compose \
+        # env -u: the deployer sets COMPOSE_FILE/COMPOSE_PROJECT_NAME for its OWN stack;
+        # those must not leak into the plugin's compose invocation, or it loads the wrong
+        # compose files (looks for infra-runner's docker-compose.yml at /) instead of
+        # discovering the plugin's compose file via --project-directory.
+        if env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME docker compose \
              --project-name "${PLUGIN_COMPOSE_PROJECT}" \
              --project-directory "${PLUGIN_COMPOSE_DIR}" \
              up -d --no-deps "${PLUGIN_COMPOSE_SERVICE}"; then
