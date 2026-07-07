@@ -230,7 +230,8 @@ _run_plugin_hooks() {
         log warn "Post-deploy hook failed (non-blocking)" script "${abs}"
       fi
     fi
-    (( i++ ))
+    i=$(( i + 1 ))   # NOT (( i++ )): post-increment returns the old value 0 on the first
+                     # iteration, which is exit status 1 under `set -e` and kills the deployer.
   done
 }
 
