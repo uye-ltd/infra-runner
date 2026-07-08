@@ -164,7 +164,7 @@ Copy `.env.example` to `.env`. Exactly one auth path must be configured:
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `PLUGINS_DIR` | no | `/plugins/` | Container path scanned for `*.plugin` descriptor files each cycle |
-| `COMPOSE_FILE` | per-plugin | `docker-compose.yml` | Append plugin overlays, e.g. `docker-compose.yml:../infra-vault/docker-compose.infra-runner.yml` |
+| `COMPOSE_FILE` | per-plugin | `docker-compose.yml` | Append plugin overlays; list all base files explicitly (setting it disables `override.yml` auto-discovery), e.g. `docker-compose.yml:docker-compose.override.yml:../infra-vault/docker-compose.infra-runner.yml` |
 
 Plugin-specific env vars (e.g. `VAULT_TOKEN`, `VAULT_ADDR`) are declared in `.env` and passed to post-deploy hook scripts via the deployer's environment. See `deployer/PLUGINS.md` for the descriptor format.
 
@@ -320,7 +320,9 @@ VAULT_COMPOSE_DIR=/home/ghrunner/infra-vault
 VAULT_TOKEN=hvs.XXXX                     # Vault operator token from `make init` output
 VAULT_ADDR=http://vault:8200
 VAULT_NET=vault-net
-COMPOSE_FILE=docker-compose.yml:../infra-vault/docker-compose.infra-runner.yml
+# List every base compose file explicitly — once COMPOSE_FILE is set, Compose no longer
+# auto-discovers docker-compose.override.yml (which is environment-specific and not committed).
+COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:../infra-vault/docker-compose.infra-runner.yml
 
 # 3. Apply:
 cd ~/infra-runner
@@ -335,7 +337,17 @@ The `docker-compose.infra-runner.yml` overlay in the infra-vault repo mounts the
 2. If new: verifies cosign signature → `docker compose up -d vault-unseal`
 3. Always: runs `scripts/apply-policies.sh` in infra-vault, which applies `vault/policies/*.hcl` via a short-lived `hashicorp/vault` container on `vault-net`
 
-Policy sync is idempotent and runs every cycle — a policy-only commit to infra-vault takes effect within `POLL_INTERVAL` seconds without rebuilding the image. Hook failure is non-blocking (Vault may be sealed during startup).
+Policy sync is idempotent and runs every cycle. Hook failure is non-blocking (Vault may be sealed during startup).
+
+> **Image-only GitOps — the deployer never `git pull`s the plugin checkout.** Only a new
+> `vault-unseal` **image** deploys automatically. Changes to the checked-out repo —
+> `vault/policies/*.hcl`, `docker/docker-compose.yml`, or the `.infra-runner.plugin` descriptor —
+> take effect only **after the on-server clone is updated**; they are *not* picked up just by
+> committing to infra-vault. Keep the checkout current with a cron (as `ghrunner`):
+>
+> ```bash
+> */5 * * * * git -C /home/ghrunner/infra-vault pull --ff-only origin main
+> ```
 
 ---
 

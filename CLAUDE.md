@@ -256,8 +256,10 @@ Poll loop (every POLL_INTERVAL seconds):
      pull_if_new(deployer:latest)  ← compare local digest before/after pull
      If new image downloaded:
        verify_image(deployer:latest)  ← cosign verify, keyless, OIDC-anchored
-       If verified: docker compose up -d --no-deps deployer; exit 0
-         (compose recreates this container; restart: unless-stopped brings it back)
+       If verified: recreate via start_self_update_helper (external helper container); exit 0
+         (helper mounts the project's PARENT at its real path + runs with -w <project-dir> so
+          COMPOSE_FILE and sibling plugin overlays like ../infra-vault/... resolve; the deployer
+          can't recreate itself in-process. restart: unless-stopped brings the replacement back)
        If NOT verified: set_unhealthy; skip
 
   2. Controller update:
@@ -280,9 +282,11 @@ Poll loop (every POLL_INTERVAL seconds):
        pull_if_new(PLUGIN_IMAGE)
        If new image downloaded:
          verify_image(PLUGIN_IMAGE, PLUGIN_CERT_IDENTITY)  ← per-plugin cert identity
-         If verified: docker compose --project-name PLUGIN_COMPOSE_PROJECT \
+         If verified: env -u COMPOSE_FILE COMPOSE_PROJECT_NAME docker compose \
+                        --project-name PLUGIN_COMPOSE_PROJECT \
                         --project-directory PLUGIN_COMPOSE_DIR \
                         up -d --no-deps PLUGIN_COMPOSE_SERVICE
+                      (env -u so the deployer's own COMPOSE_FILE/overlay does not leak in)
          If compose fails: set_unhealthy
          If NOT verified: set_unhealthy; skip
        Post-deploy hooks (PLUGIN_POST_DEPLOY_N_*):
@@ -301,6 +305,45 @@ The second argument defaults to `$CERT_IDENTITY` (infra-runner's own workflow id
 Plugin descriptors pass `$PLUGIN_CERT_IDENTITY` explicitly (the external project's workflow identity).
 Signature failures are immediately written to `/tmp/health` (atomically via `.tmp` + `mv`) and logged at `error` level.
 Pull failures are logged as warnings and set the health endpoint to unhealthy.
+
+---
+
+## Plugin system — constraints & gotchas
+
+The plugin path was first exercised by [infra-vault](https://github.com/uye-ltd/infra-vault);
+several latent deployer bugs surfaced and were fixed then (crash on the first plugin hook via
+`(( i++ ))` under `set -e`; the deployer's own `COMPOSE_FILE` leaking into the plugin's compose
+call; the self-update helper unable to resolve the plugin overlay; the controller-update path
+hitting the same overlay-resolution failure). The rules below are load-bearing — breaking any of
+them silently disables a plugin (or the deployer's own self/controller updates).
+
+- **Image-only GitOps.** The deployer pulls new *images*; it never `git pull`s a plugin's
+  workspace (or its own repo). A new signed image auto-deploys; changes to checked-out **repo
+  content** — policy files, compose files, the `*.plugin` descriptor — take effect only after the
+  on-server clone is updated (run a `git pull` cron for each plugin repo).
+- **Images must be public on the GitHub-App auth path.** The App path skips GHCR login (see the
+  deployer walkthrough), so `pull_if_new` can only fetch **public** packages — this applies to
+  plugin images too. For private packages use the PAT path (`GITHUB_TOKEN` + `scripts/ghcr-login.sh`).
+- **`COMPOSE_FILE`'s relative entries resolve against the working directory, not
+  `--project-directory`.** The deployer inherits `COMPOSE_FILE` from its `.env` (that's how a
+  plugin overlay is activated), so every compose call must be shielded from it or run from the
+  right CWD. Three guards in `deployer/entrypoint.sh` exist solely for this:
+  - **plugin compose** runs with `env -u COMPOSE_FILE COMPOSE_PROJECT_NAME` (relies on the
+    descriptor's own `--project-directory`);
+  - **self-update helper** mounts the project's parent at its real path and runs with
+    `-w <project-dir>` so `COMPOSE_FILE` + the sibling overlay resolve when recreating the deployer;
+  - **controller update** (`COMPOSE` array) pins `-f /workspace/docker-compose.yml`
+    (+ `override.yml` if present), bypassing `COMPOSE_FILE` entirely.
+- **`PLUGIN_COMPOSE_DIR` must be the directory that holds the plugin's compose file *and* its
+  `.env`** — Compose reads `.env` from the project directory, and the plugin's runtime secrets
+  (e.g. `VAULT_UNSEAL_KEY`) come from there. Post-deploy hook `SCRIPT` paths are relative to
+  `PLUGIN_COMPOSE_DIR` (infra-vault's compose lives in `docker/` but its scripts at repo root, so
+  its hook is `../scripts/apply-policies.sh`).
+- **`PLUGIN_CERT_IDENTITY` must name the workflow that *signs* the image**, and `cosign verify` is
+  an **exact** identity match. infra-vault signs `vault-unseal` in `ci.yml`, so the identity is
+  `.../infra-vault/.github/workflows/ci.yml@refs/heads/main` — not `deploy.yml`.
+
+See `deployer/PLUGINS.md` for the descriptor format and a worked example.
 
 ---
 
