@@ -93,8 +93,15 @@ set_healthy() {
     && mv "${HEALTH_FILE}.tmp" "${HEALTH_FILE}"
 }
 
+# Set by set_unhealthy, reset at the start of every poll cycle. The end-of-cycle
+# set_healthy runs only when it is still false, so a failure (signature, compose,
+# blocking hook, pull) stays visible on /health for at least one POLL_INTERVAL
+# instead of being overwritten in the same cycle.
+_cycle_unhealthy=false
+
 set_unhealthy() {
   local reason="$1"
+  _cycle_unhealthy=true
   local r="${reason//\\/\\\\}"; r="${r//\"/\\\"}"
   printf '{"status":"unhealthy","reason":"%s","ts":"%s"}\n' \
     "${r}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${HEALTH_FILE}.tmp" \
@@ -354,6 +361,7 @@ docker rm -f "${HELPER_NAME}" >/dev/null 2>&1 || true
 # ---------------------------------------------------------------------------
 
 while true; do
+  _cycle_unhealthy=false
   maybe_refresh_github_token
 
   # -------------------------------------------------------------------------
@@ -399,12 +407,10 @@ while true; do
   # -------------------------------------------------------------------------
   # 3. Runner image — verify remote signature before pulling
   # -------------------------------------------------------------------------
-  _runner_pull_ok=true
   if verify_image "${RUNNER_IMAGE}"; then
     if ! docker pull "${RUNNER_IMAGE}" --quiet > /dev/null 2>&1; then
       log warn "Runner image pull failed — controller will use cached image" image "${RUNNER_IMAGE}"
       set_unhealthy "Runner image pull failed: ${RUNNER_IMAGE}"
-      _runner_pull_ok=false
     fi
   fi
 
@@ -413,9 +419,9 @@ while true; do
   # -------------------------------------------------------------------------
   run_plugins
 
-  # Successful cycle — mark healthy (clears any transient errors from prior cycles).
-  # Skip if runner pull failed so the unhealthy state is not immediately overwritten.
-  if [[ "${_runner_pull_ok}" == true ]]; then
+  # Successful cycle — mark healthy (clears errors from prior cycles). Skipped when
+  # anything in this cycle called set_unhealthy, so that state is not overwritten.
+  if [[ "${_cycle_unhealthy}" == false ]]; then
     set_healthy
   fi
 

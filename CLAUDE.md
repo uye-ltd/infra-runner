@@ -294,8 +294,10 @@ Poll loop (every POLL_INTERVAL seconds):
          run: on_update → execute only when a new image was deployed
          blocking: false → failure = log warn only, does NOT set_unhealthy
 
-  5. set_healthy()  ← clears any transient error state from this cycle
-       Skipped if runner image pull failed (preserves unhealthy state)
+  5. set_healthy()  ← clears error state left by previous cycles
+       Skipped if anything in THIS cycle called set_unhealthy (_cycle_unhealthy flag,
+       reset at the top of each cycle) — a failure stays on /health for at least one
+       POLL_INTERVAL instead of being overwritten in the same cycle
 
   6. sleep POLL_INTERVAL
 ```
@@ -586,7 +588,8 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
   any log aggregator that reads Docker container logs.
 - **Health endpoint.** `GET :<HEALTH_PORT>/health` returns `200 {"status":"ok","ts":"..."}` during
   normal operation and `503 {"status":"unhealthy","reason":"...","ts":"..."}` after a signature
-  verification failure or compose error. Poll with UptimeRobot, Grafana, etc.
+  verification failure, compose error, failed blocking hook or runner pull failure; it stays
+  503 until the next cycle that completes without errors. Poll with UptimeRobot, Grafana, etc.
 - **The `.env` file and any mounted PEM key contain secrets — both are gitignored. Never commit them.**
 - **Remaining open threats:** proxy containers have full socket access (mitigated by being
   minimal and versioned); `$GITHUB_WORKSPACE` disk is unconstrained.

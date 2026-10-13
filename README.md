@@ -360,7 +360,7 @@ GET http://<server>:HEALTH_PORT/health
 | Response | Meaning |
 |---|---|
 | `200 {"status":"ok","ts":"..."}` | Last cycle completed cleanly |
-| `503 {"status":"unhealthy","reason":"...","ts":"..."}` | Signature verification failed or `docker compose up` errored |
+| `503 {"status":"unhealthy","reason":"...","ts":"..."}` | Last cycle failed: signature verification, `docker compose up`, a blocking post-deploy hook, or the runner image pull |
 
 Point UptimeRobot, Grafana Synthetic Monitoring, or any HTTP monitor at this endpoint.
 
