@@ -178,6 +178,20 @@ verify_image() {
   return 1
 }
 
+# Drop an image that pull_if_new just downloaded but verify_image rejected. The next
+# cycle then pulls and verifies it again, so /health stays 503 until a signed image is
+# published, and no unverified :latest is left on the host for a manual `compose up`.
+discard_image() {
+  docker image rm "$1" > /dev/null 2>&1 \
+    || log warn "Could not remove unverified image" image "$1"
+}
+
+# Components whose last deploy attempt failed (keys: deployer, controller,
+# plugin:<name>). They are retried every cycle even without a new digest, so the
+# failure re-raises set_unhealthy each cycle until the deploy succeeds.
+# In memory only: lost when the deployer restarts.
+declare -A _pending=()
+
 # ---------------------------------------------------------------------------
 # Self-update — delegated to an external sibling helper container
 # ---------------------------------------------------------------------------
@@ -229,9 +243,10 @@ start_self_update_helper() {
 # Scans PLUGINS_DIR for *.plugin descriptor files and applies image updates.
 # Each descriptor is shell-sourceable. See deployer/PLUGINS.md for the format.
 
+# Returns 1 if a blocking hook failed (call it in an `if`: set -e).
 _run_plugin_hooks() {
   local descriptor="$1" compose_dir="$2" updated="$3"
-  local i=0
+  local i=0 rc=0
   while true; do
     local script run blocking
     script=$(  set -a; source "${descriptor}" 2>/dev/null; eval "printf '%s' \"\${PLUGIN_POST_DEPLOY_${i}_SCRIPT:-}\"")
@@ -248,6 +263,7 @@ _run_plugin_hooks() {
         log info "Post-deploy hook succeeded" script "${abs}"
       elif [[ "${blocking}" == "true" ]]; then
         set_unhealthy "Post-deploy hook failed: ${abs}"
+        rc=1
       else
         log warn "Post-deploy hook failed (non-blocking)" script "${abs}"
       fi
@@ -255,6 +271,7 @@ _run_plugin_hooks() {
     i=$(( i + 1 ))   # NOT (( i++ )): post-increment returns the old value 0 on the first
                      # iteration, which is exit status 1 under `set -e` and kills the deployer.
   done
+  return "${rc}"
 }
 
 run_plugins() {
@@ -293,11 +310,13 @@ run_plugins() {
     fi
 
     log info "Checking plugin" plugin "${PLUGIN_NAME}" image "${PLUGIN_IMAGE}"
-    local updated=false
-    if pull_if_new "${PLUGIN_IMAGE}"; then
+    local key="plugin:${PLUGIN_NAME}" new=false attempted=false updated=false deploy_ok=true
+    pull_if_new "${PLUGIN_IMAGE}" && new=true
+    if [[ "${new}" == true || -n "${_pending[${key}]:-}" ]]; then
       if verify_image "${PLUGIN_IMAGE}" "${PLUGIN_CERT_IDENTITY}"; then
-        log info "New plugin image verified — updating service" \
-          plugin "${PLUGIN_NAME}" service "${PLUGIN_COMPOSE_SERVICE}"
+        attempted=true
+        log info "Plugin image verified — updating service" \
+          plugin "${PLUGIN_NAME}" service "${PLUGIN_COMPOSE_SERVICE}" retry "${_pending[${key}]:-0}"
         # env -u: the deployer sets COMPOSE_FILE/COMPOSE_PROJECT_NAME for its OWN stack;
         # those must not leak into the plugin's compose invocation, or it loads the wrong
         # compose files (looks for infra-runner's docker-compose.yml at /) instead of
@@ -310,11 +329,25 @@ run_plugins() {
           updated=true
         else
           set_unhealthy "docker compose up failed for plugin ${PLUGIN_NAME}"
+          deploy_ok=false
         fi
+      elif [[ "${new}" == true ]]; then
+        discard_image "${PLUGIN_IMAGE}"
       fi
     fi
 
-    _run_plugin_hooks "${descriptor}" "${PLUGIN_COMPOSE_DIR}" "${updated}"
+    # on_update hooks run on every retry, so a failed health wait is re-checked
+    # until it passes.
+    _run_plugin_hooks "${descriptor}" "${PLUGIN_COMPOSE_DIR}" "${updated}" || deploy_ok=false
+    # Pending is cleared only by a deploy whose compose up and blocking hooks all passed;
+    # a retry that fails verification leaves it set.
+    if [[ "${attempted}" == true ]]; then
+      if [[ "${updated}" == true && "${deploy_ok}" == true ]]; then
+        unset '_pending[${key}]'
+      else
+        _pending[${key}]=1
+      fi
+    fi
   done
 }
 
@@ -367,9 +400,11 @@ while true; do
   # -------------------------------------------------------------------------
   # 1. Self-update
   # -------------------------------------------------------------------------
-  if pull_if_new "${DEPLOYER_IMAGE}"; then
+  _new=false
+  pull_if_new "${DEPLOYER_IMAGE}" && _new=true
+  if [[ "${_new}" == true || -n "${_pending[deployer]:-}" ]]; then
     if verify_image "${DEPLOYER_IMAGE}"; then
-      log info "New deployer image verified — self-updating via external helper"
+      log info "Deployer image verified — self-updating via external helper"
       if start_self_update_helper; then
         # We are now a passive participant. The helper runs
         # `compose up -d --no-deps deployer` from OUTSIDE our lifecycle, so compose
@@ -387,20 +422,30 @@ while true; do
           timeout_s "${SELF_UPDATE_TIMEOUT}"
         set_unhealthy "Self-update helper did not replace deployer within ${SELF_UPDATE_TIMEOUT}s"
       fi
+      # Still running here = the self-update failed (helper not launched or timed out).
+      _pending[deployer]=1
+    elif [[ "${_new}" == true ]]; then
+      discard_image "${DEPLOYER_IMAGE}"
     fi
   fi
 
   # -------------------------------------------------------------------------
   # 2. Controller update
   # -------------------------------------------------------------------------
-  if pull_if_new "${CONTROLLER_IMAGE}"; then
+  _new=false
+  pull_if_new "${CONTROLLER_IMAGE}" && _new=true
+  if [[ "${_new}" == true || -n "${_pending[controller]:-}" ]]; then
     if verify_image "${CONTROLLER_IMAGE}"; then
-      log info "New controller image verified — updating controller"
+      log info "Controller image verified — updating controller"
       if "${COMPOSE[@]}" up -d --no-deps controller; then
         log info "Controller updated successfully"
+        unset '_pending[controller]'
       else
         set_unhealthy "docker compose up -d controller failed"
+        _pending[controller]=1
       fi
+    elif [[ "${_new}" == true ]]; then
+      discard_image "${CONTROLLER_IMAGE}"
     fi
   fi
 

@@ -27,7 +27,8 @@ PLUGIN_COMPOSE_SERVICE=my-service          # service name passed to docker compo
 # PLUGIN_POST_DEPLOY_N_BLOCKING  true | false       (default: true)
 #
 # run: always   → script runs every poll cycle regardless of whether a new image was deployed
-# run: on_update → script runs only when a new image was pulled and deployed
+# run: on_update → script runs after every compose up of the service: a new image, or a
+#                  retry of a failed deploy (compose up or a blocking hook failed last cycle)
 # blocking: false → failure is logged as a warning; does NOT set the health endpoint to unhealthy
 PLUGIN_POST_DEPLOY_0_SCRIPT=scripts/post-deploy.sh
 PLUGIN_POST_DEPLOY_0_RUN=always

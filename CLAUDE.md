@@ -254,33 +254,34 @@ Poll loop (every POLL_INTERVAL seconds):
 
   1. Self-update:
      pull_if_new(deployer:latest)  ← compare local digest before/after pull
-     If new image downloaded:
+     If new image downloaded OR _pending[deployer]:
        verify_image(deployer:latest)  ← cosign verify, keyless, OIDC-anchored
        If verified: recreate via start_self_update_helper (external helper container); exit 0
          (helper mounts the project's PARENT at its real path + runs with -w <project-dir> so
           COMPOSE_FILE and sibling plugin overlays like ../infra-vault/... resolve; the deployer
           can't recreate itself in-process. restart: unless-stopped brings the replacement back)
-       If NOT verified: set_unhealthy; skip
+       If helper fails / times out: set_unhealthy; _pending[deployer]=1 (retried next cycle)
+       If NOT verified: set_unhealthy; discard_image if it was just pulled
 
   2. Controller update:
      pull_if_new(controller:latest)
-     If new:
+     If new OR _pending[controller]:
        verify_image(controller:latest)
        If verified: docker compose up -d --no-deps controller
-       If compose fails: set_unhealthy
-       If NOT verified: set_unhealthy; skip
+         ok → unset _pending[controller]; fails → set_unhealthy; _pending[controller]=1
+       If NOT verified: set_unhealthy; discard_image if it was just pulled
 
   3. Runner image:
      verify_image(runner:latest)  ← checks remote registry sig WITHOUT pulling first
      If verified: docker pull runner:latest (quiet)
-       If pull fails: log warn + set_unhealthy; skip set_healthy this cycle
+       If pull fails: log warn + set_unhealthy (retried every cycle anyway)
        (controller uses locally cached image on next spawn — never blocked on a pull)
      If NOT verified: set_unhealthy; local cache untouched
 
   4. Plugin services — run_plugins():
      For each *.plugin descriptor in PLUGINS_DIR (/plugins/ by default):
        pull_if_new(PLUGIN_IMAGE)
-       If new image downloaded:
+       If new image downloaded OR _pending[plugin:NAME]:
          verify_image(PLUGIN_IMAGE, PLUGIN_CERT_IDENTITY)  ← per-plugin cert identity
          If verified: env -u COMPOSE_FILE COMPOSE_PROJECT_NAME docker compose \
                         --project-name PLUGIN_COMPOSE_PROJECT \
@@ -288,24 +289,40 @@ Poll loop (every POLL_INTERVAL seconds):
                         up -d --no-deps PLUGIN_COMPOSE_SERVICE
                       (env -u so the deployer's own COMPOSE_FILE/overlay does not leak in)
          If compose fails: set_unhealthy
-         If NOT verified: set_unhealthy; skip
+         If NOT verified: set_unhealthy; discard_image if it was just pulled
        Post-deploy hooks (PLUGIN_POST_DEPLOY_N_*):
          run: always   → execute every cycle regardless of image update
-         run: on_update → execute only when a new image was deployed
+         run: on_update → execute after every compose up (new image or retry)
          blocking: false → failure = log warn only, does NOT set_unhealthy
+       Deploy attempted (verified): compose up ok AND no blocking hook failed
+         → unset _pending[plugin:NAME]; otherwise _pending[plugin:NAME]=1
 
   5. set_healthy()  ← clears error state left by previous cycles
        Skipped if anything in THIS cycle called set_unhealthy (_cycle_unhealthy flag,
-       reset at the top of each cycle) — a failure stays on /health for at least one
-       POLL_INTERVAL instead of being overwritten in the same cycle
+       reset at the top of each cycle)
 
   6. sleep POLL_INTERVAL
 ```
 
+**503 is sticky until the deploy succeeds.** Health is computed per cycle, and a failed
+deploy is repeated every cycle until it passes, so it re-raises `set_unhealthy` each time:
+
+- **Signature failure** → `discard_image` removes the image `pull_if_new` just pulled. The
+  next cycle pulls it again (new digest) and verifies again; this repeats until a signed
+  image is published. Side effects: the unsigned image is re-downloaded every
+  `POLL_INTERVAL`, and no unverified `:latest` is left on the host for a manual `compose up`.
+- **compose up / self-update helper / blocking on_update hook failure** → `_pending[<key>]`
+  (keys `deployer`, `controller`, `plugin:<name>`) retries verify + compose up (+ on_update
+  hooks) every cycle without a new digest. For a plugin this re-runs e.g. a health-wait
+  hook until the service becomes healthy.
+- `_pending` lives in memory: restarting the deployer while a compose/hook failure is
+  pending forgets it (health returns to ok, the service may stay on the old image).
+  Signature failures survive a restart, because the unsigned image was discarded.
+
 `verify_image(image [cert_identity])` calls `cosign verify --certificate-identity <cert_identity> --certificate-oidc-issuer <token.actions.githubusercontent.com>`.
 The second argument defaults to `$CERT_IDENTITY` (infra-runner's own workflow identity) when omitted.
 Plugin descriptors pass `$PLUGIN_CERT_IDENTITY` explicitly (the external project's workflow identity).
-Signature failures are immediately written to `/tmp/health` (atomically via `.tmp` + `mv`) and logged at `error` level.
+Signature failures are immediately written to `/tmp/health` (atomically via `.tmp` + `mv`) and logged at `error` level; the just-pulled image is then discarded (`discard_image`) so it is re-verified next cycle.
 Pull failures are logged as warnings and set the health endpoint to unhealthy.
 
 ---
@@ -588,8 +605,9 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
   any log aggregator that reads Docker container logs.
 - **Health endpoint.** `GET :<HEALTH_PORT>/health` returns `200 {"status":"ok","ts":"..."}` during
   normal operation and `503 {"status":"unhealthy","reason":"...","ts":"..."}` after a signature
-  verification failure, compose error, failed blocking hook or runner pull failure; it stays
-  503 until the next cycle that completes without errors. Poll with UptimeRobot, Grafana, etc.
+  verification failure, compose error, failed blocking hook or runner pull failure. Failed
+  deploys are retried every cycle, so it stays 503 until the deploy succeeds (see the
+  deployer walkthrough for the in-memory `_pending` caveat). Poll with UptimeRobot, Grafana, etc.
 - **The `.env` file and any mounted PEM key contain secrets — both are gitignored. Never commit them.**
 - **Remaining open threats:** proxy containers have full socket access (mitigated by being
   minimal and versioned); `$GITHUB_WORKSPACE` disk is unconstrained.

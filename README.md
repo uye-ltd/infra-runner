@@ -295,7 +295,9 @@ push to main
 ```
 
 A signature verification failure immediately sets `GET /health` to `503` and skips
-the update — the currently running (verified) image stays in place.
+the update — the currently running (verified) image stays in place. The unsigned image is
+removed and re-checked every cycle, and a failed `compose up` or blocking post-deploy hook
+is retried every cycle, so `503` holds until the deploy succeeds.
 
 ---
 
@@ -360,7 +362,7 @@ GET http://<server>:HEALTH_PORT/health
 | Response | Meaning |
 |---|---|
 | `200 {"status":"ok","ts":"..."}` | Last cycle completed cleanly |
-| `503 {"status":"unhealthy","reason":"...","ts":"..."}` | Last cycle failed: signature verification, `docker compose up`, a blocking post-deploy hook, or the runner image pull |
+| `503 {"status":"unhealthy","reason":"...","ts":"..."}` | A deploy is failing: signature verification, `docker compose up`, a blocking post-deploy hook, or the runner image pull. Retried every cycle; stays `503` until it succeeds |
 
 Point UptimeRobot, Grafana Synthetic Monitoring, or any HTTP monitor at this endpoint.
 
