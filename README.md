@@ -19,9 +19,9 @@ Per job (created and destroyed by the controller):
 └── runner-job-{id}    ephemeral runner (Buildah + fuse-overlayfs primary; Kaniko compat)
 ```
 
-**Controller** maintains a warm pool of idle runners (`DESIRED_IDLE`, default 2). When a runner picks up a job it exits. The controller tears down all per-job resources and spawns a replacement.
+**Controller** keeps `DESIRED_IDLE` runners idle (default 2), up to `MAX_RUNNERS` in total; busy/idle state comes from the GitHub API. When a runner finishes its job it exits; the controller tears down its per-job resources and spawns a replacement. A controller restart or update adopts running runners instead of killing them.
 
-**Runner containers** have no Docker socket and no privileged flag. Image builds use **Buildah** with **fuse-overlayfs** (daemonless, no `--privileged`). The `kaniko` binary is also present for backward compatibility. The controller's credential (GitHub App token or PAT) never enters runner containers — only a short-lived, single-use registration token is injected at spawn time.
+**Runner containers** have no Docker socket and no privileged flag. Image builds use **Buildah** with **fuse-overlayfs** (daemonless, no `--privileged`). The `kaniko` binary is also present for backward compatibility. The controller's credential (GitHub App token or PAT) never enters runner containers — only a single-use JIT runner config is injected at spawn time, and it is removed from the environment before any job step runs.
 
 ---
 
@@ -31,7 +31,7 @@ Per job (created and destroyed by the controller):
 |---|---|
 | Malicious job leaves persistent state | Container destroyed after every job (`--ephemeral`) |
 | Privileged container escape | No privileged flag — Buildah + fuse-overlayfs builds in userspace, no DinD |
-| Credential theft | Controller credential (App token or PAT) stays in the controller; runners get only a short-lived registration token |
+| Credential theft | Controller credential (App token or PAT) stays in the controller; runners get only a single-use JIT config, unset before job steps run |
 | Docker socket abuse | Socket proxy allows only required API endpoints; `EXEC` and `BUILD` disabled on both proxies |
 | Supply chain / image tampering | cosign keyless signing in CI; deployer verifies signature before every pull; runner binary SHA256-verified at build time; CI actions pinned to commit SHAs |
 | Resource abuse (mining, DoS) | `--memory` and `--cpus` limits on every runner container; socket proxies capped at 128 MB / 0.25 CPU |
@@ -148,7 +148,12 @@ Copy `.env.example` to `.env`. Exactly one auth path must be configured:
 | `GITHUB_ORG` | yes | — | GitHub org slug (e.g. `acme`) |
 | `GITHUB_REPO` | no | `infra-runner` | Repo name; used to construct the cosign certificate identity |
 | `RUNNER_LABELS` | no | `self-hosted,linux,x64` | Comma-separated runner labels |
-| `DESIRED_IDLE` | no | `2` | Warm idle runners to keep ready |
+| `DESIRED_IDLE` | no | `2` | Idle runners to keep ready (busy runners not counted) |
+| `MAX_RUNNERS` | no | `DESIRED_IDLE` | Hard cap on runner containers, idle + busy |
+| `RUNNER_PIDS_LIMIT` | no | `4096` | Max processes per runner container |
+| `RUNNER_REGISTRATION_MODE` | no | `jit` | `jit` (single-use) or `token` (legacy, reusable for 1 h) |
+| `RUNNER_GROUP_ID` | no | `1` | Runner group for JIT registration |
+| `SHUTDOWN_CLEANUP` | no | `idle` | On controller stop: `idle`, `all` or `none` |
 | `RUNNER_MEMORY` | no | `4g` | Memory limit per runner container |
 | `RUNNER_CPUS` | no | `2` | CPU limit per runner container |
 | `RUNNER_KANIKO_SIZE` | no | `5g` | tmpfs size for Kaniko scratch space inside runner |
@@ -388,11 +393,13 @@ curl -s http://localhost:8080/health | jq .
 # List all live per-job containers
 docker ps --filter label=runner-managed=true
 
-# Force respawn all runners (e.g. after changing .env pool settings)
+# Respawn idle runners (e.g. after changing .env pool settings); busy ones finish first
 docker compose restart controller
 
-# Full teardown (in-progress jobs are interrupted)
+# Stop the stack — busy runners keep running until their job ends
 docker compose down
+# Full teardown including in-progress jobs
+docker rm -f $(docker ps -aq --filter label=runner-managed=true --filter label=runner-role=runner)
 
 # Local build after code changes
 docker compose build

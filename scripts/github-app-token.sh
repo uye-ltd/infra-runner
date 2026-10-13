@@ -32,7 +32,7 @@ generate_installation_token() {
   jwt=$(_make_jwt "${GITHUB_APP_ID}" "${GITHUB_APP_PRIVATE_KEY_PATH}")
 
   local token
-  token=$(curl -fsSL \
+  token=$(curl -fsSL --max-time 30 \
     -X POST \
     -H "Authorization: Bearer ${jwt}" \
     -H "Accept: application/vnd.github+json" \

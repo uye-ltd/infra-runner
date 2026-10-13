@@ -1,16 +1,39 @@
 #!/bin/bash
+# Runner container entrypoint. The controller injects exactly one of:
+#
+#   RUNNER_JITCONFIG           (default) single-use JIT config from
+#                              POST /orgs/{org}/actions/runners/generate-jitconfig.
+#                              Already registered and ephemeral; no config.sh step.
+#   RUNNER_REGISTRATION_TOKEN  (legacy, RUNNER_REGISTRATION_MODE=token) org
+#                              registration token, reusable for ~1 h.
+#
+# In both cases the secret is removed from the environment before `exec run.sh`,
+# so job steps (untrusted code from public repos) do not inherit it. A leaked
+# registration token would let a job register rogue runners in the org and
+# intercept other repositories' jobs.
 set -euo pipefail
+
+log() {
+  printf '{"ts":"%s","level":"%s","svc":"runner","msg":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2"
+}
+
+if [[ -n "${RUNNER_JITCONFIG:-}" ]]; then
+  jit="${RUNNER_JITCONFIG}"
+  unset RUNNER_JITCONFIG
+  log info "Starting ephemeral runner from JIT config"
+  # The config remains visible in this process's argv. That is acceptable: a JIT
+  # config is single-use and is consumed by the time any job step runs.
+  exec ./run.sh --jitconfig "${jit}"
+fi
 
 GITHUB_ORG="${GITHUB_ORG:?GITHUB_ORG is required}"
 RUNNER_NAME="${RUNNER_NAME:-$(hostname)}"
 RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,linux,x64}"
+REG_TOKEN="${RUNNER_REGISTRATION_TOKEN:?RUNNER_JITCONFIG or RUNNER_REGISTRATION_TOKEN must be injected by the controller}"
+unset RUNNER_REGISTRATION_TOKEN
 
-# Registration token must be pre-fetched and injected by the controller.
-# The token is short-lived (~1h) and is fetched immediately before container start.
-REG_TOKEN="${RUNNER_REGISTRATION_TOKEN:?RUNNER_REGISTRATION_TOKEN is required — must be injected by the controller}"
-
-# Configure in ephemeral mode: the runner auto-deregisters after exactly one job.
-# No cleanup trap needed — --ephemeral handles deregistration automatically.
+# Ephemeral: the runner auto-deregisters after exactly one job.
 ./config.sh \
   --url "https://github.com/${GITHUB_ORG}" \
   --token "${REG_TOKEN}" \
@@ -18,7 +41,7 @@ REG_TOKEN="${RUNNER_REGISTRATION_TOKEN:?RUNNER_REGISTRATION_TOKEN is required �
   --labels "${RUNNER_LABELS}" \
   --unattended \
   --ephemeral
+unset REG_TOKEN
 
-printf '{"ts":"%s","level":"info","svc":"runner","msg":"Runner registered (ephemeral). Starting."}\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+log info "Runner registered (ephemeral). Starting."
 exec ./run.sh

@@ -93,12 +93,17 @@ services:
     volumes:
       - ${COMPOSE_PROJECT_DIR}/seccomp/runner-profile.json:/home/ghrunner/infra-runner/seccomp/runner-profile.json:ro
       - /home/ghrunner/.ssh/github-app.pem:/run/secrets/github_app_key:ro
+    # Shutdown removes idle runners and deregisters them from GitHub (SHUTDOWN_CLEANUP);
+    # give it time before Docker escalates to SIGKILL.
+    stop_grace_period: 60s
+    # Liveness of the reconcile loop: the controller touches /tmp/heartbeat after every
+    # successful cycle. Stale for >5 min = loop wedged or Docker/GitHub unreachable.
     healthcheck:
-      test: ["CMD", "docker", "ps", "--filter", "label=runner-managed=true", "-q"]
+      test: ["CMD-SHELL", "test $$(( $$(date +%s) - $$(cat /tmp/heartbeat 2>/dev/null || echo 0) )) -lt 300"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      start_period: 60s
     networks:
       - controller-proxy-net
       - controller-net
