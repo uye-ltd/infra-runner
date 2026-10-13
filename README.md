@@ -33,7 +33,7 @@ Per job (created and destroyed by the controller):
 | Privileged container escape | No privileged flag — Buildah + fuse-overlayfs builds in userspace, no DinD |
 | Credential theft | Controller credential (App token or PAT) stays in the controller; runners get only a single-use JIT config, unset before job steps run |
 | Docker socket abuse | Socket proxy allows only required API endpoints; `EXEC` and `BUILD` disabled on both proxies |
-| Supply chain / image tampering | cosign keyless signing in CI; deployer verifies signature before every pull; runner binary SHA256-verified at build time; CI actions pinned to commit SHAs |
+| Supply chain / image tampering | cosign keyless signing in CI; deployer pulls only the digest cosign verified and the stack runs only the local `:verified` tag; runner binary SHA256-verified at build time; CI actions pinned to commit SHAs |
 | Resource abuse (mining, DoS) | `--memory` and `--cpus` limits on every runner container; socket proxies capped at 128 MB / 0.25 CPU |
 | Network exfiltration / lateral movement | Egress policy: DNS + HTTPS only; private RFC 1918 ranges blocked |
 | Kernel-level container escape | `seccomp/runner-profile.json` blocks `mount`, `kexec_*`, `bpf`, kernel module syscalls |
@@ -103,11 +103,12 @@ $EDITOR .env   # required: GITHUB_ORG, COMPOSE_PROJECT_NAME
                #                             GITHUB_APP_PRIVATE_KEY_PATH
                #   Static PAT (fallback):    GITHUB_TOKEN
 
-# 3. Pull and start
+# 3. Verify, pull and start
 # GitHub App path: packages must be public — no host GHCR auth needed.
 # PAT path with private images: authenticate first:
 #   bash scripts/ghcr-login.sh
-docker compose pull
+# Compose runs the LOCAL tag :verified, which only exists after cosign verification:
+bash scripts/bootstrap-images.sh
 docker compose up -d
 
 # 4. Verify
@@ -163,6 +164,10 @@ Copy `.env.example` to `.env`. Exactly one auth path must be configured:
 | `POLL_INTERVAL` | no | `60` | Seconds between GHCR digest checks |
 | `HEALTH_PORT` | no | `8080` | Port for the deployer health endpoint |
 | `CONTROLLER_POLL_INTERVAL` | no | `15` | Seconds between controller pool maintenance cycles |
+| `SELF_UPDATE_TIMEOUT` | no | `120` | Max seconds to wait for the deployer self-update helper |
+| `PLUGIN_HOOK_TIMEOUT` | no | `300` | Default timeout for plugin post-deploy hooks |
+| `PLUGIN_HOOK_ENV` | no | — | Env var names passed to all plugin hooks (see `deployer/PLUGINS.md`) |
+| `HEALTH_MAX_AGE` | no | derived | Seconds without a finished cycle before `/health` reports `stale` |
 
 **Plugin system** (all optional — each plugin activates via its own Compose overlay):
 
@@ -287,22 +292,30 @@ only what each workflow needs and set the org-level default to read-only:
 
 ```
 push to main
-  → CI builds images on self-hosted runner
+  → CI builds images on GitHub-hosted runners (ubuntu-latest)
   → CI pushes to GHCR with :latest and :sha tags
-  → CI signs each image with cosign (keyless, OIDC-anchored to the workflow)
-  → deployer detects new digest (every POLL_INTERVAL seconds, default 60s)
-      → new deployer image?      → verify sig → self-update → exit
-      → new controller image?    → verify sig → docker compose up -d controller
-      → always                   → verify runner sig → pre-pull for fast spawns
-      → for each *.plugin in /plugins/ (if any registered):
-          → new plugin image?    → verify sig → docker compose up -d <service>
-          → post-deploy hooks    → run: always | on_update; blocking: true | false
+  → CI signs each image by digest with cosign (keyless, OIDC-anchored to the workflow)
+  → deployer, every POLL_INTERVAL seconds (default 60s), for each image:
+      cosign verify :latest → pull exactly the verified digest → tag it :verified (+ :latest)
+      → deployer image ≠ running?   → self-update via helper container
+      → controller image ≠ running? → docker compose up -d controller
+      → runner                      → :verified kept current; the controller spawns from it
+      → for each *.plugin in /plugins/:
+          → plugin image ≠ running? → docker compose up -d <service>
+          → post-deploy hooks        → run: always | on_update; blocking: true | false
 ```
 
-A signature verification failure immediately sets `GET /health` to `503` and skips
-the update — the currently running (verified) image stays in place. The unsigned image is
-removed and re-checked every cycle, and a failed `compose up` or blocking post-deploy hook
-is retried every cycle, so `503` holds until the deploy succeeds.
+Unverified images are never pulled: the deployer asks cosign which digest it verified and
+pulls only that digest, and compose/controller run only the local `:verified` tag
+(`pull_policy: never`, `docker run --pull never`). A signature failure sets `GET /health` to
+`503` and leaves the running image in place. Because the deployer compares the running
+image with `:verified` every cycle, a failed `compose up`, self-update or blocking hook is
+retried every cycle — also after a deployer restart — and `503` holds until it succeeds.
+
+**Upgrading a server from the tag-pull deployer:** no action is needed before `git pull` — the
+old deployer self-updates and the new one tags all images `:verified` on its first cycle. After
+updating the checkout (whose compose file now references `:verified`), run `docker compose up -d`
+once.
 
 ---
 
@@ -367,7 +380,12 @@ GET http://<server>:HEALTH_PORT/health
 | Response | Meaning |
 |---|---|
 | `200 {"status":"ok","ts":"..."}` | Last cycle completed cleanly |
-| `503 {"status":"unhealthy","reason":"...","ts":"..."}` | A deploy is failing: signature verification, `docker compose up`, a blocking post-deploy hook, or the runner image pull. Retried every cycle; stays `503` until it succeeds |
+| `503 {"status":"starting"}` | The deployer has not finished its first cycle yet |
+| `503 {"status":"unhealthy","reason":"...","ts":"..."}` | A deploy is failing: signature verification, image pull, `docker compose up`, self-update or a blocking post-deploy hook. Retried every cycle; stays `503` until it succeeds |
+| `503 {"status":"stale","age_s":...}` | No cycle finished within `HEALTH_MAX_AGE` — the deployer loop is wedged |
+
+Docker's healthcheck only *marks* the deployer unhealthy; it does not restart it — alert on
+this endpoint.
 
 Point UptimeRobot, Grafana Synthetic Monitoring, or any HTTP monitor at this endpoint.
 

@@ -33,8 +33,9 @@ no SSH push from CI is required.
 │   ├── health_server.py              # minimal Python HTTP server for GET /health
 │   └── PLUGINS.md                    # plugin descriptor format reference + worked example
 ├── scripts/
-│   ├── ghcr-login.sh                 # refresh GHCR credentials on the host (sources github-app-token.sh; run before docker compose pull)
-│   ├── github-app-token.sh           # GitHub App JWT helper (sourced by controller + deployer): RS256 JWT → installation token
+│   ├── bootstrap-images.sh           # first start / recovery: cosign-verify, pull by digest, tag :verified
+│   ├── ghcr-login.sh                 # refresh GHCR credentials on the host (sources github-app-token.sh)
+│   ├── github-app-token.sh           # GitHub App JWT helper (sourced by controller + ghcr-login.sh): RS256 JWT → installation token
 │   ├── logging.sh                    # shared structured JSON log() function (sourced by controller + deployer)
 │   ├── setup-apparmor.sh             # one-time: install + load AppArmor profile
 │   └── setup-egress-policy.sh        # one-time: configure Docker address pool + iptables egress rules
@@ -120,6 +121,11 @@ If `GITHUB_TOKEN` is set it is used as-is and the `GITHUB_APP_*` vars are ignore
 | `POLL_INTERVAL` | no | `60` | Deployer digest check interval (seconds) |
 | `HEALTH_PORT` | no | `8080` | Deployer health endpoint port |
 | `CONTROLLER_POLL_INTERVAL` | no | `15` | Controller pool maintenance cycle interval (seconds) |
+| `SELF_UPDATE_TIMEOUT` | no | `120` | Max seconds to wait for the deployer self-update helper |
+| `PLUGIN_HOOK_TIMEOUT` | no | `300` | Default timeout (s) for plugin post-deploy hooks |
+| `PLUGIN_HOOK_ENV` | no | — | Space/comma-separated env var names passed to all plugin hooks (in addition to the descriptor's own `PLUGIN_HOOK_ENV`) |
+| `HEALTH_MAX_AGE` | no | `3×POLL_INTERVAL + SELF_UPDATE_TIMEOUT + PLUGIN_HOOK_TIMEOUT` | `/health` returns 503 `stale` when no cycle finished within this many seconds |
+| `PRUNE_INTERVAL` | no | `3600` | Min seconds between dangling-image prunes |
 
 **Plugin system** (all optional; each plugin activates via its own Compose overlay):
 
@@ -256,96 +262,64 @@ All per-job resources carry labels `runner-managed=true` and `runner-job-id={id}
 
 ## deployer/entrypoint.sh walkthrough
 
+Level-triggered reconcile loop: every cycle re-reads desired state (the locally tagged
+`:verified` image) and actual state (the running container's image) and applies the
+difference. A failed deploy is therefore retried every cycle, and a deployer restart
+loses nothing — there is no in-memory "pending" queue.
+
 ```
 Startup:
-  Auth path A (preferred): GITHUB_APP_ID + GITHUB_APP_INSTALLATION_ID + GITHUB_APP_PRIVATE_KEY_PATH
-    → source scripts/github-app-token.sh
-    → acquire_github_token(): RS256 JWT → POST /app/installations/{id}/access_tokens → GITHUB_TOKEN
-  Auth path B (fallback): GITHUB_TOKEN set directly → used as-is, App flow skipped
-  GHCR login (PAT path only):
-    Write {"auths":{"ghcr.io":{"auth":"<base64>"}}} directly to /root/.docker/config.json
-    App path: skipped — App installation tokens cannot access GHCR; packages must be public
-  1. Start health_server.py in background (serves GET /health from /tmp/health)
-  2. set_healthy()  ← write {"status":"ok","ts":"..."} to /tmp/health
-  3. Log startup info (JSON)
+  Validate env (COMPOSE_PROJECT_DIR required + absolute; numeric intervals).
+  write_health starting (→ 503); start health_server.py.
+  GITHUB_TOKEN (classic PAT) set → write GHCR auth to /root/.docker/config.json.
+  Otherwise → anonymous pulls (images must be public). The deployer needs no GitHub
+  App credential: App installation tokens cannot access GHCR anyway.
+  Remove a leftover self-update helper container.
 
-Poll loop (every POLL_INTERVAL seconds):
+Each cycle (run_cycle, every POLL_INTERVAL seconds; never exits the loop on errors):
 
-  0. maybe_refresh_github_token()  ← no-op on PAT path; refreshes token at 55 min on App path
-                                      (no GHCR re-login — App path never authenticates to GHCR)
+  sync_image(REF, IDENTITY):                        ← shared by every component
+    verify_remote:  cosign verify REF (:latest) → the digest cosign verified (_digest).
+                    cosign stderr is logged; "no matching signatures / identity mismatch"
+                    vs "could not complete" (network/registry) give different reasons.
+    ensure_verified_local: docker pull REPO@DIGEST (only if absent) and docker tag it as
+                    REPO:verified AND REPO:<watched tag>. Unverified content never lands
+                    on the host, and the local :latest only ever points to a verified image.
+    _desired_id = image ID of REPO:verified (the previous verified image if this
+                  cycle's verification failed).
 
-  1. Self-update:
-     pull_if_new(deployer:latest)  ← compare local digest before/after pull
-     If new image downloaded OR _pending[deployer]:
-       verify_image(deployer:latest)  ← cosign verify, keyless, OIDC-anchored
-       If verified: recreate via start_self_update_helper (external helper container); exit 0
-         (helper mounts the project's PARENT at its real path + runs with -w <project-dir> so
-          COMPOSE_FILE and sibling plugin overlays like ../infra-vault/... resolve; the deployer
-          can't recreate itself in-process. restart: unless-stopped brings the replacement back)
-       If helper fails / times out: set_unhealthy; _pending[deployer]=1 (retried next cycle)
-       If NOT verified: set_unhealthy; discard_image if it was just pulled
-
-  2. Controller update:
-     pull_if_new(controller:latest)
-     If new OR _pending[controller]:
-       verify_image(controller:latest)
-       If verified: docker compose up -d --no-deps controller
-         ok → unset _pending[controller]; fails → set_unhealthy; _pending[controller]=1
-       If NOT verified: set_unhealthy; discard_image if it was just pulled
-
-  3. Runner image:
-     verify_image(runner:latest)  ← checks remote registry sig WITHOUT pulling first
-     If verified: docker pull runner:latest (quiet)
-       If pull fails: log warn + set_unhealthy (retried every cycle anyway)
-       (controller uses locally cached image on next spawn — never blocked on a pull)
-     If NOT verified: set_unhealthy; local cache untouched
-
-  4. Plugin services — run_plugins():
-     For each *.plugin descriptor in PLUGINS_DIR (/plugins/ by default):
-       pull_if_new(PLUGIN_IMAGE)
-       If new image downloaded OR _pending[plugin:NAME]:
-         verify_image(PLUGIN_IMAGE, PLUGIN_CERT_IDENTITY)  ← per-plugin cert identity
-         If verified: env -u COMPOSE_FILE COMPOSE_PROJECT_NAME docker compose \
-                        --project-name PLUGIN_COMPOSE_PROJECT \
-                        --project-directory PLUGIN_COMPOSE_DIR \
-                        up -d --no-deps PLUGIN_COMPOSE_SERVICE
-                      (env -u so the deployer's own COMPOSE_FILE/overlay does not leak in)
-         If compose fails: set_unhealthy
-         If NOT verified: set_unhealthy; discard_image if it was just pulled
-       Post-deploy hooks (PLUGIN_POST_DEPLOY_N_*):
-         run: always   → execute every cycle regardless of image update
-         run: on_update → execute after every compose up (new image or retry)
-         blocking: false → failure = log warn only, does NOT set_unhealthy
-       Deploy attempted (verified): compose up ok AND no blocking hook failed
-         → unset _pending[plugin:NAME]; otherwise _pending[plugin:NAME]=1
-
-  5. set_healthy()  ← clears error state left by previous cycles
-       Skipped if anything in THIS cycle called set_unhealthy (_cycle_unhealthy flag,
-       reset at the top of each cycle)
-
-  6. sleep POLL_INTERVAL
+  1. deployer:   sync_image(uye-deployer:latest); actual = image of the compose container
+                 (labels com.docker.compose.project/service). Differs → self_update():
+                   docker run -d --entrypoint docker uye-deployer:verified \
+                     compose --project-name P --project-directory DIR up -d --no-deps deployer
+                   (argv, no shell string; mounts the project's PARENT at its real path and
+                    runs with -w <project dir> so COMPOSE_FILE + sibling plugin overlays resolve)
+                 Polls the helper every 3 s: exit≠0 → its last 20 log lines + 503 and the
+                 cycle continues; exit 0 but still alive after 30 s → 503; SELF_UPDATE_TIMEOUT.
+                 Success: compose stops us (SIGTERM → shutdown) and starts the replacement.
+  2. controller: sync_image(infra-runner-controller:latest); differs →
+                 docker compose -f /workspace/docker-compose.yml up -d --no-deps controller,
+                 then re-check (still different → 503 "check its image ref").
+  3. runner:     sync_image(infra-runner:latest) only — the controller spawns from :verified.
+  4. plugins:    run_plugins() — see "Plugin system" below.
+  5. No reasons recorded → write_health ok, then maybe_prune (dangling images older than
+     24 h, at most every PRUNE_INTERVAL). Otherwise write_health unhealthy with all reasons.
+  6. Interruptible sleep POLL_INTERVAL (SIGTERM handled immediately).
 ```
 
-**503 is sticky until the deploy succeeds.** Health is computed per cycle, and a failed
-deploy is repeated every cycle until it passes, so it re-raises `set_unhealthy` each time:
+**Health semantics.** `set_unhealthy` writes `/tmp/health` immediately and records the
+reason; the end-of-cycle write reports `ok` only if no reason was recorded. Because desired
+vs actual is re-evaluated every cycle, a failing deploy keeps `/health` at 503 until it
+succeeds — including across deployer restarts. The health server returns 503 `stale` if the
+file is older than `HEALTH_MAX_AGE` (wedged loop), and the loop restarts the server if it dies.
 
-- **Signature failure** → `discard_image` removes the image `pull_if_new` just pulled. The
-  next cycle pulls it again (new digest) and verifies again; this repeats until a signed
-  image is published. Side effects: the unsigned image is re-downloaded every
-  `POLL_INTERVAL`, and no unverified `:latest` is left on the host for a manual `compose up`.
-- **compose up / self-update helper / blocking on_update hook failure** → `_pending[<key>]`
-  (keys `deployer`, `controller`, `plugin:<name>`) retries verify + compose up (+ on_update
-  hooks) every cycle without a new digest. For a plugin this re-runs e.g. a health-wait
-  hook until the service becomes healthy.
-- `_pending` lives in memory: restarting the deployer while a compose/hook failure is
-  pending forgets it (health returns to ok, the service may stay on the old image).
-  Signature failures survive a restart, because the unsigned image was discarded.
+**Functions return data through globals** (`_digest`, `_desired_id`, `_actual_id`, `P[]`),
+not `$(…)`: they call `set_unhealthy`, and a reason recorded inside a subshell would be lost.
 
-`verify_image(image [cert_identity])` calls `cosign verify --certificate-identity <cert_identity> --certificate-oidc-issuer <token.actions.githubusercontent.com>`.
-The second argument defaults to `$CERT_IDENTITY` (infra-runner's own workflow identity) when omitted.
-Plugin descriptors pass `$PLUGIN_CERT_IDENTITY` explicitly (the external project's workflow identity).
-Signature failures are immediately written to `/tmp/health` (atomically via `.tmp` + `mv`) and logged at `error` level; the just-pulled image is then discarded (`discard_image`) so it is re-verified next cycle.
-Pull failures are logged as warnings and set the health endpoint to unhealthy.
+**Migration from the tag-pull deployer.** Old servers update themselves: the old deployer
+self-updates with the old compose file (`:latest`), and the new deployer's first cycle tags
+everything `:verified`/`:latest`. After `git pull` of the new compose file run
+`docker compose up -d` once. Fresh hosts use `scripts/bootstrap-images.sh`.
 
 ---
 
@@ -362,9 +336,26 @@ them silently disables a plugin (or the deployer's own self/controller updates).
   workspace (or its own repo). A new signed image auto-deploys; changes to checked-out **repo
   content** — policy files, compose files, the `*.plugin` descriptor — take effect only after the
   on-server clone is updated (run a `git pull` cron for each plugin repo).
-- **Images must be public on the GitHub-App auth path.** The App path skips GHCR login (see the
-  deployer walkthrough), so `pull_if_new` can only fetch **public** packages — this applies to
+- **Images must be public on the GitHub-App auth path.** The deployer authenticates to GHCR
+  only with a classic PAT (`GITHUB_TOKEN`); otherwise it pulls anonymously — this applies to
   plugin images too. For private packages use the PAT path (`GITHUB_TOKEN` + `scripts/ghcr-login.sh`).
+- **The plugin's compose file must reference exactly `PLUGIN_IMAGE` and must not use
+  `pull_policy: always`.** The deployer pulls the verified digest and re-tags it as
+  `PLUGIN_IMAGE`'s tag; compose then starts that local image. A different ref or a forced pull
+  would bypass verification — the deployer detects the mismatch after `compose up` and reports 503.
+- **Descriptors are parsed as data, never `source`d.** `KEY=VALUE` lines, `${VAR}`/`$VAR`
+  expanded from the deployer's exported environment, no command substitution; unknown keys are
+  ignored with a warning.
+- **Hooks are the trust boundary.** Hook scripts are unsigned code from the on-server checkout
+  and run inside the deployer, which can reach the Docker API (= root on the host). Anyone who can
+  push to a plugin repo that a `git pull` cron follows can execute code here — protect those
+  branches (or verify signed commits in the cron). Hooks run under `env -i` with an allowlist
+  (`PLUGIN_HOOK_ENV` in the descriptor and/or `.env`); without an allowlist they get the full
+  environment **minus** `GITHUB_TOKEN`/`GITHUB_APP_*` (legacy, warns once). Each hook has a
+  timeout (`PLUGIN_POST_DEPLOY_N_TIMEOUT`, default `PLUGIN_HOOK_TIMEOUT=300`).
+- **on_update hook retries are in memory.** A failing blocking on_update hook is retried every
+  cycle; if the deployer restarts in between, the retry is forgotten (the service itself is
+  already on the verified image).
 - **`COMPOSE_FILE`'s relative entries resolve against the working directory, not
   `--project-directory`.** The deployer inherits `COMPOSE_FILE` from its `.env` (that's how a
   plugin overlay is activated), so every compose call must be shielded from it or run from the
@@ -409,12 +400,16 @@ See `deployer/PLUGINS.md` for the descriptor format and a worked example.
 
 **deployer service**
 - Connects via `DOCKER_HOST=tcp://deployer-proxy:2375` — no direct socket mount
-- Mounts `./:/workspace:ro` for `docker compose up` (reads compose file + `.env`)
+- `image: …/uye-deployer:verified`, `pull_policy: never` — `:verified` is a local tag set by
+  the deployer after cosign verification (controller likewise; `RUNNER_IMAGE` is `:verified`)
+- Mounts `${COMPOSE_PROJECT_DIR}:/workspace:ro` for `docker compose up` (reads compose file + `.env`);
+  no GitHub App key (the deployer does not need one)
 - Exposes `HEALTH_PORT` for the health endpoint
 - `depends_on: deployer-proxy`
 - `restart: unless-stopped`
 - `tmpfs: /root/.docker` — GHCR credentials written here (ephemeral, never touches overlay fs)
-- `healthcheck`: `GET /health` every 30s — compose can detect and restart a wedged deployer
+- `healthcheck`: `GET /health` every 30s (`start_period: 120s`). Docker only marks the
+  container unhealthy — it does **not** restart it; alert on `/health` externally
 
 **Networks** (all within 172.20.0.0/24, outside the 10.89.0.0/16 runner pool):
 - `controller-proxy-net`: 172.20.0.0/26 — controller-proxy ↔ controller only
@@ -492,9 +487,9 @@ $EDITOR .env   # required: GITHUB_ORG, COMPOSE_PROJECT_NAME
                # recommended: RUNNER_SECCOMP_HOST_PATH
 
 # 4. Start
-# GitHub App path: packages must be public — no GHCR auth needed for `docker compose pull`.
-# PAT path with private images: run `bash scripts/ghcr-login.sh` before pulling.
-docker compose pull      # pulls controller-proxy, deployer-proxy, controller, deployer
+# GitHub App path: packages must be public — no GHCR auth needed.
+# PAT path with private images: run `bash scripts/ghcr-login.sh` first.
+bash scripts/bootstrap-images.sh   # cosign-verify, pull by digest, tag :verified
 docker compose up -d
 
 # 5. Verify
@@ -621,9 +616,10 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
   from `10.89.0.0/16` and adds iptables `DOCKER-USER` rules allowing only DNS (53) and
   HTTPS (443) from that subnet. Private RFC 1918 ranges are explicitly blocked.
 - **Image signatures.** CI signs all three images (runner, controller, deployer) with cosign
-  keyless signing tied to the workflow's GitHub Actions OIDC identity. The deployer verifies
-  every image signature before pulling or applying. A verification failure immediately sets
-  the health endpoint to `503` and skips the update.
+  keyless signing tied to the workflow's GitHub Actions OIDC identity. The deployer
+  cosign-verifies the remote tag, pulls **the exact digest cosign verified**, and only then tags
+  it `:verified`; compose (`pull_policy: never`) and the controller (`--pull never`) run only
+  that tag. A verification failure sets `/health` to `503` and nothing is pulled.
 - **Workflow `GITHUB_TOKEN` scope must be minimised in downstream workflows.** Declare a
   `permissions:` block in every workflow, and set the org-level default to read-only at
   **Settings → Actions → General → Workflow permissions**.
@@ -631,10 +627,10 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
   (`ts`, `level`, `svc`, `msg`, plus contextual fields). Pipe through `jq` or ingest with
   any log aggregator that reads Docker container logs.
 - **Health endpoint.** `GET :<HEALTH_PORT>/health` returns `200 {"status":"ok","ts":"..."}` during
-  normal operation and `503 {"status":"unhealthy","reason":"...","ts":"..."}` after a signature
-  verification failure, compose error, failed blocking hook or runner pull failure. Failed
-  deploys are retried every cycle, so it stays 503 until the deploy succeeds (see the
-  deployer walkthrough for the in-memory `_pending` caveat). Poll with UptimeRobot, Grafana, etc.
+  normal operation and `503` with `status` `starting` (before the first cycle), `unhealthy`
+  (`reason`: signature failure, pull/compose error, failed blocking hook, self-update failure) or
+  `stale` (no cycle finished within `HEALTH_MAX_AGE`). Failed deploys are retried every cycle,
+  so it stays 503 until the deploy succeeds. Poll with UptimeRobot, Grafana, etc.
 - **The `.env` file and any mounted PEM key contain secrets — both are gitignored. Never commit them.**
 - **Remaining open threats:** proxy containers have full socket access (mitigated by being
   minimal and versioned); `$GITHUB_WORKSPACE` disk is unconstrained.
