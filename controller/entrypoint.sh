@@ -95,13 +95,6 @@ else
   GITHUB_TOKEN=""  # populated by acquire_github_token
 fi
 
-ghcr_login() {
-  local auth_b64
-  auth_b64=$(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 -w0)
-  printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "${auth_b64}" > /root/.docker/config.json \
-    || log warn "GHCR auth setup failed — pulls of private images will fail"
-}
-
 acquire_github_token() {
   local tok
   tok=$(generate_installation_token) || {
@@ -599,9 +592,6 @@ main() {
       log warn "Retrying GitHub App token acquisition in 30s"
       interruptible_sleep 30
     done
-  else
-    log info "Authenticating with GHCR"
-    ghcr_login
   fi
 
   # Adopt running runners from a previous controller; clean up only dead leftovers.

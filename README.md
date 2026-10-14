@@ -81,7 +81,8 @@ the controls above reduce, but do not remove, these risks:
     Fine-grained tokens do not support `manage_runners:org`.
 - **GHCR packages must be public** when using a GitHub App. App installation tokens cannot
   authenticate to GHCR regardless of the `Packages: Read` permission — this is a GitHub
-  limitation. The controller and deployer pull images anonymously. To keep packages private,
+  limitation. The deployer pulls images anonymously; the controller uses only a local verified
+  runner image. To keep packages private,
   use a classic PAT with `read:packages` instead.
 
 ---
@@ -138,7 +139,7 @@ $EDITOR .env   # required: GITHUB_ORG, COMPOSE_PROJECT_NAME
                # auth — pick one:
                #   GitHub App (recommended): GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID,
                #                             GITHUB_APP_PRIVATE_KEY_PATH
-               #   Static PAT (fallback):    GITHUB_TOKEN
+               #   Static PAT (fallback):    GITHUB_TOKEN, GHCR_USERNAME
 
 # 3. Verify, pull and start
 # GitHub App path: packages must be public — no host GHCR auth needed.
@@ -177,7 +178,8 @@ Copy `.env.example` to `.env`. Exactly one auth path must be configured:
 | `GITHUB_APP_INSTALLATION_ID` | yes (App) | Numeric org installation ID |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | yes (App) | Container path to the PEM key (mounted `:ro`) |
 
-**Static PAT (backward compat)** — set `GITHUB_TOKEN` and leave the App vars unset.
+**Static PAT (backward compat)** — set `GITHUB_TOKEN` and `GHCR_USERNAME` (the GitHub
+account that owns the PAT), and leave the App vars unset.
 
 **All other variables:**
 
@@ -555,4 +557,6 @@ Create at: **github.com/settings/tokens → Tokens (classic)**
 | `admin:org` | Required alongside `manage_runners:org` |
 | `read:packages` | Pull runner image from GHCR (if package is private) |
 
-Set `GITHUB_TOKEN=ghp_...` in `.env`. Leave all `GITHUB_APP_*` vars unset.
+Set `GITHUB_TOKEN=ghp_...` and `GHCR_USERNAME=<PAT owner's GitHub username>` in `.env`.
+Leave all `GITHUB_APP_*` vars unset. Existing PAT installations must add `GHCR_USERNAME`
+before updating the controller and deployer images.

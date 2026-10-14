@@ -24,9 +24,13 @@ if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   log error "GHCR login requires GITHUB_TOKEN (classic PAT); GitHub App tokens cannot access GHCR"
   exit 1
 fi
+if [[ ! "${GHCR_USERNAME:-}" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]]; then
+  log error "GHCR_USERNAME must be the GitHub username that owns GITHUB_TOKEN"
+  exit 1
+fi
 
 log info "Logging in to ghcr.io"
-printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u x-access-token --password-stdin \
+printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin \
   || { log error "docker login failed"; exit 1; }
 
 log info "GHCR login succeeded"

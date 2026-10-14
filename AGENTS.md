@@ -35,6 +35,7 @@ no SSH push from CI is required.
 ├── scripts/
 │   ├── bootstrap-images.sh           # first start / recovery: cosign-verify, pull by digest, tag :verified
 │   ├── ghcr-login.sh                 # GHCR login with classic PAT for private packages
+│   ├── ghcr-auth.sh                  # deployer Docker auth config writer
 │   ├── github-app-token.sh           # GitHub App JWT helper (sourced by controller): RS256 JWT → installation token
 │   ├── logging.sh                    # shared structured JSON log() function (sourced by controller + deployer)
 │   ├── promote-images.sh             # verify all :sha candidates, then promote signed digests to :latest
@@ -50,6 +51,7 @@ no SSH push from CI is required.
 │   ├── bootstrap-images.bats        # first-start digest verification vs stubbed Docker / cosign
 │   ├── promote-images.bats           # release promotion gate vs stubbed cosign / Docker
 │   ├── ghcr-login.bats               # host GHCR login auth path vs stubbed Docker
+│   ├── ghcr-auth.bats                # deployer Docker auth config writer
 │   ├── test_health_server.py         # health server (stdlib unittest)
 │   └── stubs/{controller,deployer,ghcr,promotion}/  # fake docker, cosign, curl, uuidgen
 ├── .hadolint.yaml
@@ -112,8 +114,12 @@ controller settings there.
 | `GITHUB_APP_INSTALLATION_ID` | App path | — | Numeric installation ID (org-level install) |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | App path | — | Container path to the PEM key (mounted `:ro`) |
 | `GITHUB_TOKEN` | PAT path | — | Classic PAT fallback: `admin:org`, `manage_runners:org`, `read:packages` |
+| `GHCR_USERNAME` | PAT path | — | GitHub account that owns the PAT; used for GHCR authentication |
 
-If `GITHUB_TOKEN` is set it is used as-is and the `GITHUB_APP_*` vars are ignored. If it is unset all three `GITHUB_APP_*` vars are required. The controller mints a short-lived installation access token at startup and refreshes it every 55 minutes.
+If `GITHUB_TOKEN` is set it is used as-is, `GHCR_USERNAME` is required by the deployer,
+and the `GITHUB_APP_*` vars are ignored. If it is unset all three `GITHUB_APP_*` vars are
+required. The controller mints a short-lived installation access token at startup and
+refreshes it every 55 minutes.
 
 **All other variables:**
 
@@ -231,9 +237,8 @@ Startup:
        → source scripts/github-app-token.sh
        → acquire_github_token(): RS256 JWT → POST /app/installations/{id}/access_tokens → GITHUB_TOKEN
      Auth path B (fallback): GITHUB_TOKEN set directly → used as-is, App flow skipped
-  2. GHCR login (PAT path only):
-       Write {"auths":{"ghcr.io":{"auth":"<base64>"}}} directly to /root/.docker/config.json
-       App path: skipped — App installation tokens cannot access GHCR; packages must be public
+  2. No GHCR login or image pull: the deployer maintains the local :verified runner image,
+     and `docker run --pull never` uses that image even with private packages.
   3. ADOPT running runners from a previous controller run; remove only exited/dead/created
      runner containers and per-job networks whose container is gone.
      (Never `rm -f` running runners at startup — a controller restart/update must not abort jobs.)
@@ -314,7 +319,7 @@ does not discard them.
 Startup:
   Validate env (COMPOSE_PROJECT_DIR required + absolute; numeric intervals).
   write_health starting (→ 503); start health_server.py.
-  GITHUB_TOKEN (classic PAT) set → write GHCR auth to /root/.docker/config.json.
+  GITHUB_TOKEN (classic PAT) set → write GHCR auth with GHCR_USERNAME to /root/.docker/config.json.
   Otherwise → anonymous pulls (images must be public). The deployer needs no GitHub
   App credential: App installation tokens cannot access GHCR anyway.
   Remove a leftover self-update helper container.
@@ -451,7 +456,7 @@ See `deployer/PLUGINS.md` for the descriptor format and a worked example.
 - Connects via `DOCKER_HOST=tcp://controller-proxy:2375` — no direct socket mount
 - `depends_on: controller-proxy`
 - `restart: unless-stopped`
-- `tmpfs: /root/.docker` — GHCR credentials written here (ephemeral, never touches overlay fs)
+- No registry credentials or `/root/.docker` tmpfs: the controller never pulls images
 - **No `env_file`**: an explicit `environment:` allowlist interpolated from `.env`, so secrets
   meant for plugin hooks (e.g. `VAULT_TOKEN`) never reach the controller.
   `RUNNER_APPARMOR_PROFILE: ${RUNNER_APPARMOR_PROFILE-infra-runner}` uses `-` so an explicitly
@@ -586,7 +591,7 @@ cd ~/infra-runner
 cp .env.example .env
 $EDITOR .env   # required: GITHUB_ORG, COMPOSE_PROJECT_NAME
                # auth (pick one): GITHUB_APP_ID + GITHUB_APP_INSTALLATION_ID + GITHUB_APP_PRIVATE_KEY_PATH
-               #              or: GITHUB_TOKEN (classic PAT, backward compat)
+               #              or: GITHUB_TOKEN + GHCR_USERNAME (classic PAT, backward compat)
                # recommended: RUNNER_SECCOMP_HOST_PATH
 
 # 4. Start

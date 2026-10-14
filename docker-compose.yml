@@ -119,8 +119,6 @@ services:
     cap_drop:
       - ALL
     logging: *default-logging
-    tmpfs:
-      - /root/.docker   # docker login writes here; ephemeral, never touches overlay fs
     volumes:
       - ${COMPOSE_PROJECT_DIR:?COMPOSE_PROJECT_DIR must be set in .env}/seccomp/runner-profile.json:/home/ghrunner/infra-runner/seccomp/runner-profile.json:ro
       # Host path of the GitHub App key. On the PAT path Docker creates an empty directory

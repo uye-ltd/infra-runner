@@ -82,6 +82,8 @@ COMPOSE=(docker compose --project-name "${COMPOSE_PROJECT_NAME}" --project-direc
 LOG_SVC=deployer
 # shellcheck source=scripts/logging.sh
 source "${SCRIPTS_DIR}/logging.sh"
+# shellcheck source=scripts/ghcr-auth.sh
+source "${SCRIPTS_DIR}/ghcr-auth.sh"
 
 _ERR_FILE="$(mktemp)"
 
@@ -126,12 +128,6 @@ ensure_health_server() {
 # Only a classic PAT (GITHUB_TOKEN) can authenticate to GHCR. GitHub App installation
 # tokens cannot, so on the App path images are pulled anonymously (must be public) and
 # the deployer needs no GitHub credential at all.
-ghcr_login() {
-  local auth_b64
-  auth_b64=$(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 -w0)
-  printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "${auth_b64}" > /root/.docker/config.json \
-    || log warn "GHCR auth setup failed — pulls of private images will fail"
-}
 
 # ---------------------------------------------------------------------------
 # Image helpers
@@ -701,7 +697,7 @@ main() {
 
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     log info "Authenticating with GHCR (PAT)"
-    ghcr_login
+    write_ghcr_auth || die "GHCR auth setup failed"
   else
     log info "No GITHUB_TOKEN — pulling public images anonymously"
   fi
