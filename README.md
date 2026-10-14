@@ -324,8 +324,8 @@ only what each workflow needs and set the org-level default to read-only:
 ```
 push to main
   → CI builds images on GitHub-hosted runners (ubuntu-latest)
-  → CI pushes to GHCR with :latest and :sha tags
-  → CI signs each image by digest with cosign (keyless, OIDC-anchored to the workflow)
+  → CI pushes each image to GHCR by :sha tag
+  → CI signs and scans the digest, then promotes that same digest to :latest
   → deployer, every POLL_INTERVAL seconds (default 60s), for each image:
       cosign verify :latest → pull exactly the verified digest → tag it :verified (+ :latest)
       → deployer image ≠ running?   → self-update via helper container
@@ -460,12 +460,15 @@ docker compose up -d
 ## Development
 
 ```bash
-bash tests/run.sh   # bats (controller + deployer logic) + unittest (health server), in a container
+bash scripts/verify.sh         # syntax, linters, Compose, bats and unittest; requires Docker
+bash scripts/verify.sh syntax  # host-only syntax checks (no Docker daemon needed)
 ```
 
-CI (`.github/workflows/ci.yml`) runs shellcheck, hadolint, actionlint, zizmor,
-`docker compose config` and the test suite on every PR; `deploy.yml` builds and
-trivy-scans the images. See AGENTS.md → *Tests* for the conventions the tests rely on.
+CI calls the same script for lint and tests. `deploy.yml` loads PR builds into Docker before
+scanning them. Fixable HIGH vulnerabilities are reported; fixable CRITICAL vulnerabilities
+block publication. Reviewed exceptions go in `.trivyignore.yaml` with an expiration date.
+The `:latest` tag moves only after the digest is signed and passes the scan. See AGENTS.md →
+*Tests* for the test conventions.
 
 ---
 

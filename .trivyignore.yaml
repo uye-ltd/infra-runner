@@ -1,0 +1,3 @@
+# Add only reviewed, temporary exceptions here. Every entry must include an
+# affected image/package, a reason in the PR, and an expiration date.
+vulnerabilities: []

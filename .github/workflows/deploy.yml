@@ -1,7 +1,7 @@
 name: Build & Publish Images
 
 # Pull requests: build (and scan) only, with a read-only token.
-# Push to main: build, push to GHCR with :latest and :<sha>, cosign-sign by digest.
+# Push to main: build and push :<sha>, sign and scan by digest, then promote :latest.
 # The on-server deployer verifies the signature and applies the update — no SSH here.
 #
 # Also enable "Require approval for all outside collaborators" in
@@ -22,8 +22,6 @@ concurrency:
 permissions: {}
 
 env:
-  # Report-only image scan. Set to 1 to fail the build on fixable HIGH/CRITICAL CVEs.
-  TRIVY_EXIT_CODE: 0
   TRIVY_IMAGE: aquasec/trivy:0.63.0@sha256:6fb0646988fcd2fdf7bf123f7174945ebc2c9c72d1fa1567c8d7daeeb70f8037
 
 jobs:
@@ -51,15 +49,26 @@ jobs:
           context: .
           file: ${{ matrix.file }}
           push: false
+          load: true
           tags: ci/${{ matrix.image }}:${{ github.sha }}
 
-      - name: Scan image (trivy)
+      - name: Report fixable HIGH vulnerabilities
         env:
           IMAGE: ci/${{ matrix.image }}:${{ github.sha }}
         run: |
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "${TRIVY_IMAGE}" \
-            image --no-progress --ignore-unfixed --severity HIGH,CRITICAL \
-            --exit-code "${TRIVY_EXIT_CODE}" "${IMAGE}"
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${PWD}:/repo:ro" "${TRIVY_IMAGE}" \
+            image --no-progress --ignore-unfixed --severity HIGH \
+            --ignorefile /repo/.trivyignore.yaml --exit-code 0 "${IMAGE}"
+
+      - name: Block fixable CRITICAL vulnerabilities
+        env:
+          IMAGE: ci/${{ matrix.image }}:${{ github.sha }}
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${PWD}:/repo:ro" "${TRIVY_IMAGE}" \
+            image --no-progress --ignore-unfixed --severity CRITICAL \
+            --ignorefile /repo/.trivyignore.yaml --exit-code 1 "${IMAGE}"
 
   publish:
     if: github.event_name == 'push'
@@ -93,16 +102,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push image
+      - name: Build and push immutable image
         id: build
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
         with:
           context: .
           file: ${{ matrix.file }}
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:latest
-            ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ github.sha }}
+          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ github.sha }}
 
       # Sign by digest (immutable), not by tag. Keyless: the signature is bound to this
       # workflow's OIDC identity (deploy.yml@refs/heads/main), which the deployer requires.
@@ -113,10 +120,36 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: cosign sign --yes "${IMAGE}@${DIGEST}"
 
-      - name: Scan image (trivy)
+      - name: Report fixable HIGH vulnerabilities
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}
         run: |
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "${TRIVY_IMAGE}" \
-            image --no-progress --ignore-unfixed --severity HIGH,CRITICAL \
-            --exit-code "${TRIVY_EXIT_CODE}" "${IMAGE}"
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${PWD}:/repo:ro" -v "${HOME}/.docker:/root/.docker:ro" "${TRIVY_IMAGE}" \
+            image --no-progress --ignore-unfixed --severity HIGH \
+            --ignorefile /repo/.trivyignore.yaml --exit-code 0 "${IMAGE}"
+
+      - name: Block fixable CRITICAL vulnerabilities
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${PWD}:/repo:ro" -v "${HOME}/.docker:/root/.docker:ro" "${TRIVY_IMAGE}" \
+            image --no-progress --ignore-unfixed --severity CRITICAL \
+            --ignorefile /repo/.trivyignore.yaml --exit-code 1 "${IMAGE}"
+
+      # A single-source promotion must preserve the signed digest. Buildx otherwise
+      # wraps a single manifest in a new index, which would not carry our signature.
+      - name: Promote signed digest to latest
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker buildx imagetools create --prefer-index=false \
+            --metadata-file "${RUNNER_TEMP}/promoted.json" \
+            --tag "${IMAGE}:latest" "${IMAGE}@${DIGEST}"
+          promoted=$(jq -r '."containerimage.descriptor".digest' "${RUNNER_TEMP}/promoted.json")
+          [[ "${promoted}" == "${DIGEST}" ]] || {
+            echo "Promoted digest ${promoted} differs from signed digest ${DIGEST}" >&2
+            exit 1
+          }

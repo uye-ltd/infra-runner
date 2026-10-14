@@ -477,22 +477,21 @@ by digest. Every workflow starts from `permissions: {}` and grants per job.
 
 ```
 pull_request → job build   (contents: read)
-                 checkout (persist-credentials: false) → build (no push) → trivy scan
+                 checkout (persist-credentials: false) → build + load locally → trivy scan
 push to main → job publish (contents: read, packages: write, id-token: write)
                  checkout → cosign-installer (v2.2.4) → login ghcr.io
-                 → build + push ghcr.io/{owner}/{image}:{latest,sha}
+                 → build + push ghcr.io/{owner}/{image}:sha
                  → cosign sign --yes {image}@{digest}   (keyless; auth from the login step)
-                 → trivy scan
+                 → trivy scan → promote the same digest to :latest
 ```
 
 - `concurrency`: publishes are serialised (`cancel-in-progress: false`), so an older build can
   never finish last and move `:latest` backwards; PR builds of the same ref cancel each other.
-- Trivy is report-only (`TRIVY_EXIT_CODE: 0`); set it to `1` to block on fixable HIGH/CRITICAL.
+- Trivy reports fixable HIGH findings and blocks on fixable CRITICAL findings; reviewed,
+  expiring exceptions live in `.trivyignore.yaml`.
 - `${{ }}` expressions are passed to `run:` via `env:` only (no template injection — zizmor).
 
-**`ci.yml`** — `lint` (shellcheck, hadolint with `.hadolint.yaml`, actionlint, zizmor
-`--offline`, `docker compose config` with `.env.example`, py_compile) and `test`
-(`bash tests/run.sh`).
+**`ci.yml`** — `lint` and `test` call `scripts/verify.sh`, the same local entrypoint.
 
 **`runner-version.yml`** — weekly; fails with an annotation containing the exact
 `ARG RUNNER_VERSION` / `ARG RUNNER_SHA256` lines when actions/runner has a newer release.
@@ -508,7 +507,8 @@ from repo secrets if previously set.
 ## Tests
 
 ```bash
-bash tests/run.sh      # builds tests/Dockerfile, runs bats + unittest in a container
+bash scripts/verify.sh         # lint + tests, same checks as CI
+bash scripts/verify.sh syntax  # host-only syntax checks
 ```
 
 The entrypoints only run `main` when executed, so tests `source` them and call functions
