@@ -45,7 +45,7 @@ for name in uye-deployer infra-runner-controller infra-runner; do
           "${repo}:latest")
   digest=$(jq -r '[.[].critical.image."docker-manifest-digest"] | unique
                   | if length == 1 then .[0] else empty end' <<< "${out}")
-  [[ "${digest}" == sha256:* ]] || { echo "ERROR: could not determine verified digest for ${repo}" >&2; exit 1; }
+  [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "ERROR: could not determine verified digest for ${repo}" >&2; exit 1; }
   echo "    verified ${digest}"
   docker pull --quiet "${repo}@${digest}" > /dev/null
   docker tag "${repo}@${digest}" "${repo}:verified"

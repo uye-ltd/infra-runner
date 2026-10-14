@@ -47,6 +47,7 @@ no SSH push from CI is required.
 │   ├── Dockerfile                    # test env: ubuntu + bats + jq + python3
 │   ├── controller.bats               # controller reconcile logic vs stubbed docker / GitHub API
 │   ├── deployer.bats                 # deployer reconcile + plugin logic vs stubbed docker / cosign
+│   ├── bootstrap-images.bats        # first-start digest verification vs stubbed Docker / cosign
 │   ├── promote-images.bats           # release promotion gate vs stubbed cosign / Docker
 │   ├── test_health_server.py         # health server (stdlib unittest)
 │   └── stubs/{controller,deployer,promotion}/  # fake docker, cosign, curl, uuidgen
@@ -539,7 +540,8 @@ bash scripts/verify.sh syntax  # host-only syntax checks
 
 The entrypoints only run `main` when executed, so tests `source` them and call functions
 directly against stubs in `tests/stubs/` (state kept in files under `$ST`, every call logged
-to `$CALLS`). Conventions that matter:
+to `$CALLS`). The bootstrap tests run a copy of the standalone script against a temporary
+`.env` and Docker stub. Conventions that matter:
 
 - Call `reconcile` / `run_cycle` as `if reconcile; …` — production relies on errexit being
   ignored inside them.

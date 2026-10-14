@@ -159,7 +159,7 @@ verify_remote() {
              "${ref}" 2> "${_ERR_FILE}"); then
     _digest=$(jq -r '[.[].critical.image."docker-manifest-digest"] | unique
                      | if length == 1 then .[0] else empty end' <<< "${out}" 2>/dev/null || true)
-    if [[ "${_digest}" == sha256:* ]]; then
+    if [[ "${_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
       return 0
     fi
     log error "cosign output did not contain exactly one verified digest" image "${ref}"

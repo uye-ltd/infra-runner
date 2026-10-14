@@ -342,8 +342,9 @@ push to main
           → post-deploy hooks        → run: always | on_update; blocking: true | false
 ```
 
-Unverified images are never pulled: the deployer asks cosign which digest it verified and
-pulls only that digest, and compose/controller run only the local `:verified` tag
+Unverified images are never pulled: the deployer asks cosign which digest it verified,
+requires a full 64-character SHA-256 digest, and pulls only that digest. The first-start
+bootstrap script applies the same check; compose/controller run only the local `:verified` tag
 (`pull_policy: never`, `docker run --pull never`). A signature failure sets `GET /health` to
 `503` and leaves the running image in place. Because the deployer compares the running
 image with `:verified` every cycle, a failed `compose up` or self-update is retried every

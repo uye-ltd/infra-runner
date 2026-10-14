@@ -83,6 +83,18 @@ baseline() {
   hreason | grep -q 'Sigstore unreachable'
 }
 
+@test "malformed verified digest cannot be pulled or tagged" {
+  baseline
+  sig infra-runner-controller sha256:short
+  verified infra-runner-controller id-old
+  running controller id-old
+  cycle
+  [ "$(hstatus)" = unhealthy ]
+  hreason | grep -q 'Could not determine verified digest for ghcr.io/acme/infra-runner-controller:latest'
+  refute grep -q 'docker pull .*infra-runner-controller' "${CALLS}"
+  refute grep -q 'docker tag .*infra-runner-controller' "${CALLS}"
+}
+
 @test "running image differs from :verified (e.g. after a restart): applied without a new digest" {
   baseline
   sig infra-runner-controller sha256:c2; have infra-runner-controller sha256:c2; running controller id-sha256:c1
