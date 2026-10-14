@@ -13,6 +13,8 @@ SECCOMP="${RUNNER_SECCOMP_HOST_PATH-$(cd "$(dirname "$0")/.." && pwd)/seccomp/ru
 PREFIX="${RUNNER_SUBNET_PREFIX:-10.89}"
 HOST_IP="${KATA_CHECK_HOST_IP:-10.0.0.1}"
 LAN_IP="${KATA_CHECK_LAN_IP:-10.0.0.2}"
+SKIP_EGRESS="${KATA_CHECK_SKIP_EGRESS:-0}"
+DNS="${RUNNER_KATA_DNS:-1.1.1.1}"
 name="kata-check-$$"
 network="${name}-net"
 failures=0
@@ -30,11 +32,15 @@ cleanup() {
 trap cleanup EXIT
 
 command -v docker > /dev/null || { report docker FAIL 'docker is unavailable'; exit 1; }
-command -v iptables > /dev/null || { report firewall FAIL 'iptables is unavailable'; exit 1; }
-if ! iptables -L INFRA-RUNNER-FWD -n > /dev/null 2>&1 \
-   || ! iptables -L INFRA-RUNNER-IN -n > /dev/null 2>&1; then
-  report firewall FAIL 'INFRA-RUNNER-FWD/IN chains are missing'
-  exit 1
+if [[ "${SKIP_EGRESS}" == 1 ]]; then
+  echo 'SKIP: egress isolation checks (KATA_CHECK_SKIP_EGRESS=1); compatibility result is incomplete'
+else
+  command -v iptables > /dev/null || { report firewall FAIL 'iptables is unavailable'; exit 1; }
+  if ! iptables -L INFRA-RUNNER-FWD -n > /dev/null 2>&1 \
+     || ! iptables -L INFRA-RUNNER-IN -n > /dev/null 2>&1; then
+    report firewall FAIL 'INFRA-RUNNER-FWD/IN chains are missing'
+    exit 1
+  fi
 fi
 docker image inspect "${IMAGE}" > /dev/null 2>&1 \
   || { report image FAIL "${IMAGE} must be present locally"; exit 1; }
@@ -60,7 +66,7 @@ base=(--rm --pull never --network "${network}"
   --tmpfs '/tmp:rw,nosuid,size=1g' --tmpfs '/root:rw,nosuid,size=512m'
   --tmpfs "/kaniko:rw,nosuid,size=${KANIKO_SIZE}" --device /dev/fuse
   "${security[@]}" --entrypoint /bin/bash "${IMAGE}")
-common=(--runtime kata "${base[@]}")
+common=(--runtime kata -e "RUNNER_KATA_DNS=${DNS}" "${base[@]}")
 
 runc_start=$(date +%s)
 if docker run "${base[@]}" -c 'uname -r' > /dev/null 2>&1; then
@@ -87,6 +93,7 @@ fi
 
 if out=$(docker run -i "${common[@]}" -s <<'BASH' 2>&1
 set -euo pipefail
+printf 'nameserver %s\n' "${RUNNER_KATA_DNS}" > /etc/resolv.conf
 work=$(mktemp -d /tmp/kata-build.XXXXXX)
 trap 'rm -rf "$work"' EXIT
 printf 'owner test\n' > "$work/payload"
@@ -104,33 +111,35 @@ else
   report 'Buildah chroot and fuse-overlayfs' FAIL "${out: -700}"
 fi
 
-if docker run "${common[@]}" -c 'curl -fsSL --max-time 15 https://github.com -o /dev/null' > /dev/null 2>&1; then
+if out=$(docker run "${common[@]}" -c 'printf "nameserver %s\n" "$RUNNER_KATA_DNS" > /etc/resolv.conf; curl -fsSL --max-time 15 https://github.com -o /dev/null' 2>&1); then
   report 'public HTTPS' PASS
 else
-  report 'public HTTPS' FAIL 'curl https://github.com failed'
+  report 'public HTTPS' FAIL "${out:0:500}"
 fi
 
 # Check both failed connections and a matching increase in host DROP counters.
 drop_count() {
   local chain="$1" destination="$2"
   iptables -vnxL "${chain}" | awk -v d="${destination}" \
-    '$3 == "DROP" && $9 == d { sum += $1 } END { print sum + 0 }'
+    '$3 == "DROP" && $10 == d { sum += $1 } END { print sum + 0 }'
 }
-host_before=$(drop_count INFRA-RUNNER-IN 0.0.0.0/0)
-if docker run "${common[@]}" -c 'timeout 4 bash -c "</dev/tcp/$1/22"' _ "${HOST_IP}" > /dev/null 2>&1; then
-  report 'host access blocked' FAIL "${HOST_IP}:22 was reachable"
-elif (( $(drop_count INFRA-RUNNER-IN 0.0.0.0/0) > host_before )); then
-  report 'host access blocked' PASS "${HOST_IP}:22 hit INFRA-RUNNER-IN DROP"
-else
-  report 'host access blocked' FAIL "${HOST_IP}:22 failed without an INPUT DROP"
-fi
-lan_before=$(drop_count INFRA-RUNNER-FWD 10.0.0.0/8)
-if docker run "${common[@]}" -c 'timeout 4 bash -c "</dev/tcp/$1/22"' _ "${LAN_IP}" > /dev/null 2>&1; then
-  report 'LAN access blocked' FAIL "${LAN_IP}:22 was reachable"
-elif (( $(drop_count INFRA-RUNNER-FWD 10.0.0.0/8) > lan_before )); then
-  report 'LAN access blocked' PASS "${LAN_IP}:22 hit INFRA-RUNNER-FWD DROP"
-else
-  report 'LAN access blocked' FAIL "${LAN_IP}:22 failed without a FORWARD DROP"
+if [[ "${SKIP_EGRESS}" != 1 ]]; then
+  host_before=$(drop_count INFRA-RUNNER-IN 0.0.0.0/0)
+  if docker run "${common[@]}" -c 'timeout 4 bash -c "</dev/tcp/$1/22"' _ "${HOST_IP}" > /dev/null 2>&1; then
+    report 'host access blocked' FAIL "${HOST_IP}:22 was reachable"
+  elif (( $(drop_count INFRA-RUNNER-IN 0.0.0.0/0) > host_before )); then
+    report 'host access blocked' PASS "${HOST_IP}:22 hit INFRA-RUNNER-IN DROP"
+  else
+    report 'host access blocked' FAIL "${HOST_IP}:22 failed without an INPUT DROP"
+  fi
+  lan_before=$(drop_count INFRA-RUNNER-FWD 10.0.0.0/8)
+  if docker run "${common[@]}" -c 'timeout 4 bash -c "</dev/tcp/$1/22"' _ "${LAN_IP}" > /dev/null 2>&1; then
+    report 'LAN access blocked' FAIL "${LAN_IP}:22 was reachable"
+  elif (( $(drop_count INFRA-RUNNER-FWD 10.0.0.0/8) > lan_before )); then
+    report 'LAN access blocked' PASS "${LAN_IP}:22 hit INFRA-RUNNER-FWD DROP"
+  else
+    report 'LAN access blocked' FAIL "${LAN_IP}:22 failed without a FORWARD DROP"
+  fi
 fi
 
 printf 'Summary: %s failure(s).\n' "${failures}"

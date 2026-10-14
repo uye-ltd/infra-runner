@@ -7,7 +7,7 @@ VERSION=4.2.0
 SHA256=b828904fa3f1e49ddd7dc799c72cb1503cd1e772d354c3987c8d4189b2a623a8
 URL="https://github.com/kata-containers/kata-containers/releases/download/${VERSION}/kata-static-${VERSION}-amd64.tar.zst"
 SHIM=/opt/kata/runtime-rs/bin/containerd-shim-kata-v2
-CONFIG=/opt/kata/share/defaults/kata-containers/runtime-rs/configuration-qemu-runtime-rs.toml
+CONFIG=/opt/kata/share/defaults/kata-containers/runtime-rs/configuration-clh-runtime-rs.toml
 SMOKE_IMAGE="${KATA_SMOKE_IMAGE:-ubuntu:24.04}"
 
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -47,8 +47,8 @@ else
   tar --use-compress-program=zstd -xf "${work}/kata.tar.zst" -C "${stage}"
   [[ -x "${stage}/opt/kata/runtime-rs/bin/containerd-shim-kata-v2" ]] \
     || fail 'release archive has no Rust shim'
-  [[ -f "${stage}/opt/kata/share/defaults/kata-containers/runtime-rs/configuration-qemu-runtime-rs.toml" ]] \
-    || fail 'release archive has no Rust QEMU configuration'
+  [[ -f "${stage}/opt/kata/share/defaults/kata-containers/runtime-rs/configuration-clh-runtime-rs.toml" ]] \
+    || fail 'release archive has no Rust Cloud Hypervisor configuration'
   printf '%s\n' "${VERSION}" > "${stage}/opt/kata/.infra-runner-version"
   mv "${stage}/opt/kata" /opt/kata
 fi
