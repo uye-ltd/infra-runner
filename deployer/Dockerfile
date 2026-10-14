@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Keyless verification: no private key stored here; trust is anchored to the
 # GitHub Actions OIDC identity that signed the image in CI.
 # Pinned by both version tag and digest so a force-pushed tag cannot substitute a different binary.
-COPY --from=gcr.io/projectsigstore/cosign:v2.4.1@sha256:b03690aa52bfe94054187142fba24dc54137650682810633901767d8a3e15b31 /ko-app/cosign /usr/local/bin/cosign
+COPY --from=ghcr.io/sigstore/cosign/cosign:v3.1.3@sha256:9e5c2f2edc34351160407ca3416c61855bdf9403c3c5936e0f0be7fc261611b8 /ko-app/cosign /usr/local/bin/cosign
 
 COPY scripts/logging.sh /scripts/logging.sh
 COPY scripts/ghcr-auth.sh /scripts/ghcr-auth.sh
