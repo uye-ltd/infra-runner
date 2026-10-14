@@ -13,7 +13,8 @@ refute() { if "$@"; then echo "refute: unexpectedly succeeded: $*" >&2; return 1
 setup() {
   export ST="${BATS_TEST_TMPDIR}/state" CALLS="${BATS_TEST_TMPDIR}/calls"
   export HEALTH_FILE="${BATS_TEST_TMPDIR}/health" PLUGINS_DIR="${BATS_TEST_TMPDIR}/plugins"
-  mkdir -p "${ST}" "${PLUGINS_DIR}"; : > "${CALLS}"
+  export HOOK_STATE_DIR="${BATS_TEST_TMPDIR}/hook-state" HOOK_STATE_REQUIRED=false
+  mkdir -p "${ST}" "${PLUGINS_DIR}" "${HOOK_STATE_DIR}"; : > "${CALLS}"
   export PATH="${BATS_TEST_DIRNAME}/stubs/deployer:${PATH}"
   export GITHUB_ORG=acme COMPOSE_PROJECT_NAME=infra-runner COMPOSE_PROJECT_DIR=/home/gh/infra-runner \
          SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" SELF_UPDATE_TIMEOUT=9 GITHUB_TOKEN=ghp_SECRET
@@ -234,6 +235,83 @@ EOF
   cycle
   [ "$(hstatus)" = ok ]
   [ -e "${BATS_TEST_TMPDIR}/update_hook_ran" ]
+}
+
+@test "failed on_update hook resumes after deployer restart" {
+  plugin_fixture
+  cat >> "${PLUGINS_DIR}/v.plugin" <<'EOF'
+PLUGIN_POST_DEPLOY_0_SCRIPT=update.sh
+EOF
+  cat > "${BATS_TEST_TMPDIR}/pw/update.sh" <<EOF
+[[ -e "${BATS_TEST_TMPDIR}/allow_hook" ]] || exit 23
+echo ran >> "${BATS_TEST_TMPDIR}/update_hook_ran"
+EOF
+  cycle
+  [ "$(hstatus)" = unhealthy ]
+  [ "$(cat "${HOOK_STATE_DIR}/vault-unseal.pending")" = id-sha256:b2 ]
+  [ "$(cat "${ST}/ctr_vault-unseal")" = id-sha256:b2 ]
+
+  touch "${BATS_TEST_TMPDIR}/allow_hook"
+  source "${BATS_TEST_DIRNAME}/../deployer/entrypoint.sh"; set +u
+  cycle
+  [ "$(hstatus)" = ok ]
+  [ -f "${BATS_TEST_TMPDIR}/update_hook_ran" ]
+  [ ! -e "${HOOK_STATE_DIR}/vault-unseal.pending" ]
+}
+
+@test "compose failure retains on_update state across deployer restart" {
+  plugin_fixture
+  cat >> "${PLUGINS_DIR}/v.plugin" <<'EOF'
+PLUGIN_POST_DEPLOY_0_SCRIPT=update.sh
+EOF
+  echo "touch ${BATS_TEST_TMPDIR}/update_hook_ran" > "${BATS_TEST_TMPDIR}/pw/update.sh"
+  touch "${ST}/compose_fail"
+  cycle
+  [ "$(hstatus)" = unhealthy ]
+  [ -f "${HOOK_STATE_DIR}/vault-unseal.pending" ]
+  [ ! -e "${BATS_TEST_TMPDIR}/update_hook_ran" ]
+
+  rm "${ST}/compose_fail"
+  source "${BATS_TEST_DIRNAME}/../deployer/entrypoint.sh"; set +u
+  cycle
+  [ "$(hstatus)" = ok ]
+  [ -f "${BATS_TEST_TMPDIR}/update_hook_ran" ]
+  [ ! -e "${HOOK_STATE_DIR}/vault-unseal.pending" ]
+}
+
+@test "stale pending hook target is retried for the verified running image" {
+  plugin_fixture
+  cat >> "${PLUGINS_DIR}/v.plugin" <<'EOF'
+PLUGIN_POST_DEPLOY_0_SCRIPT=update.sh
+EOF
+  echo "touch ${BATS_TEST_TMPDIR}/update_hook_ran" > "${BATS_TEST_TMPDIR}/pw/update.sh"
+  have vault-unseal sha256:b2; verified vault-unseal id-sha256:b2
+  running vault-unseal id-sha256:b2
+  printf 'id-old\n' > "${HOOK_STATE_DIR}/vault-unseal.pending"
+  cycle
+  [ "$(hstatus)" = ok ]
+  [ -f "${BATS_TEST_TMPDIR}/update_hook_ran" ]
+  [ ! -e "${HOOK_STATE_DIR}/vault-unseal.pending" ]
+  refute grep -q 'compose .*up -d --no-deps vault-unseal' "${CALLS}"
+}
+
+@test "plugin update is blocked when hook retry state cannot be saved" {
+  plugin_fixture
+  HOOK_STATE_DIR="${BATS_TEST_TMPDIR}/blocked-state"
+  touch "${HOOK_STATE_DIR}"
+  cycle
+  [ "$(hstatus)" = unhealthy ]
+  hreason | grep -q 'Cannot persist pending hook state for plugin vault-unseal'
+  refute grep -q 'compose .*up -d --no-deps vault-unseal' "${CALLS}"
+}
+
+@test "plugin update is blocked until the hook state volume is mounted" {
+  plugin_fixture
+  HOOK_STATE_REQUIRED=true
+  cycle
+  [ "$(hstatus)" = unhealthy ]
+  hreason | grep -q 'Plugin hook state volume is not mounted'
+  refute grep -q 'compose .*up -d --no-deps vault-unseal' "${CALLS}"
 }
 
 @test "plugin compose success without a running service stays unhealthy" {

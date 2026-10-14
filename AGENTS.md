@@ -164,8 +164,8 @@ passed to post-deploy hook scripts via the deployer's inherited environment.
 | `VAULT_ADDR` | no | `http://vault:8200` | Vault address reachable on vault-net |
 | `VAULT_NET` | no | `vault-net` | Docker network Vault is on |
 
-`RUNNER_IMAGE` and `DOCKER_HOST` are set in the Compose `environment` block (not `.env`)
-and must not be overridden there.
+`RUNNER_IMAGE`, `DOCKER_HOST`, `HOOK_STATE_DIR` and `HOOK_STATE_REQUIRED` are set in the Compose `environment`
+block (not `.env`) and must not be overridden there.
 
 `RUNNER_SECCOMP_HOST_PATH` is read by the docker CLI **inside the controller** (it uploads the
 profile's contents), so it must point at the compose-mounted copy. Leave empty to fall back to
@@ -305,8 +305,9 @@ job networks also carry `runner-created-at={epoch}` for orphan cleanup's 120 s g
 
 Level-triggered reconcile loop: every cycle re-reads desired state (the locally tagged
 `:verified` image) and actual state (the running container's image) and applies the
-difference. A failed deploy is therefore retried every cycle, and a deployer restart
-loses nothing — there is no in-memory "pending" queue.
+difference. A failed deploy is therefore retried every cycle. Pending plugin `on_update`
+hooks are stored in the `deployer-state` volume before `compose up`, so a deployer restart
+does not discard them.
 
 ```
 Startup:
@@ -399,10 +400,11 @@ them silently disables a plugin (or the deployer's own self/controller updates).
   timeout (`PLUGIN_POST_DEPLOY_N_TIMEOUT`, default `PLUGIN_HOOK_TIMEOUT=300`, 1–3600 s).
   Invalid hook timeouts mark health unhealthy, even for non-blocking hooks. A hook that
   ignores SIGTERM is killed 5 s after its timeout.
-- **on_update hook retries are in memory.** An `on_update` hook runs only after the plugin service is
-  observed running on the verified image. An inspection failure keeps the hook pending for
-  the next cycle. A failing blocking hook is retried every cycle; if the deployer restarts
-  in between, the retry is forgotten (the service itself is already on the verified image).
+- **on_update hook retries are persistent.** The deployer writes a marker with the target
+  image ID to `deployer-state` before changing a plugin service. An `on_update` hook runs
+  only after that image is observed running. Inspection or blocking-hook failure keeps
+  the marker across cycles and deployer restarts. A hook may rerun after a crash between
+  its success and marker removal, so hook scripts must be idempotent.
 - **`COMPOSE_FILE`'s relative entries resolve against the working directory, not
   `--project-directory`.** The deployer inherits `COMPOSE_FILE` from its `.env` (that's how a
   plugin overlay is activated), so every compose call must be shielded from it or run from the
@@ -479,9 +481,12 @@ See `deployer/PLUGINS.md` for the descriptor format and a worked example.
 - `deployer-proxy-net`: 172.20.128.0/26 — deployer-proxy ↔ deployer only
 - `deployer-net`: 172.20.128.64/26 — deployer egress (internet, GHCR)
 
-**No named volumes** — runners use tmpfs only. Per-job networks are created by the controller
+**Named volume:** `deployer-state` stores plugin hook retry markers. Runner jobs still use
+tmpfs only. Per-job networks are created by the controller
 with an explicit `--subnet` `<RUNNER_SUBNET_PREFIX>.<n>.0/24` (third octet derived from the job
 id, moved on overlap through all 256 `/24` candidates), so only runner networks fall into the egress-restricted range.
+The deployer checks that its hook state path is a mount point before processing plugins,
+so a new image started with an older Compose file cannot silently lose pending retries.
 
 **Plugin overlays** — external projects ship their own `docker-compose.infra-runner.yml` that
 extends the deployer service with the mounts their plugin needs (the `*.plugin` descriptor file

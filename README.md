@@ -349,8 +349,12 @@ bootstrap script applies the same check; compose/controller run only the local `
 `503` and leaves the running image in place. Because the deployer compares the running
 image with `:verified` every cycle, a failed `compose up` or self-update is retried every
 cycle, including after a deployer restart. The deployer confirms that the service is running
-on the verified image before reporting success. A failed blocking plugin hook is retried
-each cycle while the deployer stays up; its pending state is lost on deployer restart.
+on the verified image before reporting success. Pending `on_update` hooks are recorded in
+the deployer's `deployer-state` volume before a plugin service update. Failing blocking hooks
+are retried after deployer restarts. Hooks can run again if the deployer stops after the
+hook succeeds but before its pending marker is cleared, so hook scripts must be idempotent.
+If the new deployer starts with an older Compose file that lacks this volume, plugin updates
+pause and `/health` reports 503 until `docker compose up -d` applies the new file.
 Promotion starts only when all three images pass their build, signature and CRITICAL scan.
 The three registry tag updates are sequential, so a registry failure during promotion can
 still leave a partially updated set until the workflow is rerun.

@@ -58,6 +58,9 @@ validate_range HEALTH_MAX_AGE 1 86400
 validate_range HEALTH_PORT 1 65535
 export HEALTH_FILE HEALTH_PORT HEALTH_MAX_AGE
 PLUGINS_DIR="${PLUGINS_DIR:-/plugins/}"
+HOOK_STATE_DIR="${HOOK_STATE_DIR:-/var/lib/infra-runner-deployer}"
+[[ "${HOOK_STATE_DIR}" == /* ]] || die "HOOK_STATE_DIR must be an absolute path"
+HOOK_STATE_REQUIRED="${HOOK_STATE_REQUIRED:-true}"
 SCRIPTS_DIR="${SCRIPTS_DIR:-/scripts}"
 HEALTH_SERVER="${HEALTH_SERVER:-/health_server.py}"
 HELPER_NAME="${COMPOSE_PROJECT_NAME}-deployer-selfupdate"
@@ -382,7 +385,6 @@ reconcile_controller() {
 # a timeout (see run_plugin_hooks). See deployer/PLUGINS.md.
 
 declare -gA P=()                 # the descriptor being processed
-declare -gA _hooks_pending=()    # plugin name → 1 while a blocking on_update hook keeps failing
 declare -gA _legacy_env_warned=()
 declare -gA _seen_plugins=()      # plugin name → descriptor path within this cycle
 
@@ -517,6 +519,52 @@ run_plugin_hooks() {
   return "${rc}"
 }
 
+# Persist the target image ID before changing the service. A restart after
+# compose up (or during a hook) can then retry on_update against that image.
+mark_hook_pending() {
+  local name="$1" image_id="$2" path="${HOOK_STATE_DIR}/$1.pending"
+  if ! mkdir -p "${HOOK_STATE_DIR}" \
+     || ! printf '%s\n' "${image_id}" > "${path}.tmp" \
+     || ! mv -f "${path}.tmp" "${path}"; then
+    set_unhealthy "Cannot persist pending hook state for plugin ${name}"
+    return 1
+  fi
+}
+
+# pending_hook_image NAME → _pending_image_id
+pending_hook_image() {
+  local name="$1" path="${HOOK_STATE_DIR}/$1.pending"
+  _pending_image_id=""
+  [[ -e "${path}" ]] || return 0
+  if ! _pending_image_id=$(cat "${path}"); then
+    set_unhealthy "Cannot read pending hook state for plugin ${name}"
+    return 1
+  fi
+  if [[ -z "${_pending_image_id}" ]]; then
+    set_unhealthy "Empty pending hook state for plugin ${name}"
+    return 1
+  fi
+}
+
+clear_hook_pending() {
+  local name="$1"
+  if ! rm -f "${HOOK_STATE_DIR}/${name}.pending"; then
+    set_unhealthy "Cannot clear pending hook state for plugin ${name}"
+    return 1
+  fi
+}
+
+# A new deployer image can start with an older Compose file during migration.
+# Refuse plugin updates until its state directory is backed by the named volume.
+hook_state_mounted() {
+  local mount_id parent device root mountpoint rest
+  [[ -r /proc/self/mountinfo ]] || return 1
+  while read -r mount_id parent device root mountpoint rest; do
+    [[ "${mountpoint}" == "${HOOK_STATE_DIR}" ]] && return 0
+  done < /proc/self/mountinfo
+  return 1
+}
+
 process_plugin() {
   local descriptor="$1"
   parse_descriptor "${descriptor}"
@@ -547,11 +595,12 @@ process_plugin() {
       log info "Plugin image changed — updating service" plugin "${name}" service "${P[PLUGIN_COMPOSE_SERVICE]}"
       # env -u: the deployer's own COMPOSE_FILE/COMPOSE_PROJECT_NAME must not leak into the
       # plugin's compose invocation; the plugin's compose file is discovered via --project-directory.
-      if env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME docker compose \
+      if ! mark_hook_pending "${name}" "${_desired_id}"; then
+        : # Never update the service without recording the hook retry first.
+      elif env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME docker compose \
            --project-name "${P[PLUGIN_COMPOSE_PROJECT]}" \
            --project-directory "${P[PLUGIN_COMPOSE_DIR]}" \
            up -d --no-deps "${P[PLUGIN_COMPOSE_SERVICE]}"; then
-        _hooks_pending[${name}]=1
         if ! compose_container_image "${P[PLUGIN_COMPOSE_PROJECT]}" "${P[PLUGIN_COMPOSE_SERVICE]}"; then
           set_unhealthy "Plugin ${name}: cannot inspect service after compose up"
         elif [[ "${_actual_id}" != "${_desired_id}" ]]; then
@@ -568,21 +617,32 @@ process_plugin() {
     fi
   fi
 
-  # Keep a pending hook across inspection failures, but run it only after the
-  # updated service is observed running on the verified image.
+  # Run the pending hook only after the intended image is observed running.
   local run_on_update=false
-  if [[ -n "${_hooks_pending[${name}]:-}" && "${service_verified}" == true ]]; then
-    run_on_update=true
+  if [[ "${service_verified}" == true ]] && pending_hook_image "${name}"; then
+    if [[ -n "${_pending_image_id}" && "${_pending_image_id}" != "${_desired_id}" ]]; then
+      log warn "Pending hook target differs from running verified image; retrying for current image" plugin "${name}"
+      if mark_hook_pending "${name}" "${_desired_id}"; then
+        _pending_image_id="${_desired_id}"
+      else
+        _pending_image_id=""
+      fi
+    fi
+    [[ -n "${_pending_image_id}" ]] && run_on_update=true
   fi
   if run_plugin_hooks "${run_on_update}"; then
     if [[ "${run_on_update}" == true ]]; then
-      unset "_hooks_pending[${name}]"
+      clear_hook_pending "${name}"
     fi
   fi
 }
 
 run_plugins() {
   [[ -d "${PLUGINS_DIR}" ]] || return 0
+  if [[ "${HOOK_STATE_REQUIRED}" == true ]] && ! hook_state_mounted; then
+    set_unhealthy "Plugin hook state volume is not mounted at ${HOOK_STATE_DIR}; apply the updated docker-compose.yml"
+    return 0
+  fi
   local descriptor files=()
   _seen_plugins=()
   shopt -s nullglob

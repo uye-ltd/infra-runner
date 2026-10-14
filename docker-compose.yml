@@ -159,6 +159,8 @@ services:
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-infra-runner}
       HEALTH_PORT: ${HEALTH_PORT:-8080}
       DOCKER_HOST: tcp://deployer-proxy:2375
+      HOOK_STATE_DIR: /var/lib/infra-runner-deployer
+      HOOK_STATE_REQUIRED: "true"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -172,6 +174,7 @@ services:
       - /root/.docker   # docker login writes here; ephemeral, never touches overlay fs
     volumes:
       - ${COMPOSE_PROJECT_DIR:?COMPOSE_PROJECT_DIR must be set in .env}:/workspace:ro   # deployer reads compose file + .env to apply updates
+      - deployer-state:/var/lib/infra-runner-deployer   # pending on_update hooks survive deployer restarts
     # No GitHub App key here: the deployer needs no GitHub credential on the App path
     # (images are public); on the PAT path it uses GITHUB_TOKEN from .env.
     healthcheck:
@@ -186,7 +189,8 @@ services:
       - deployer-proxy-net
       - deployer-net
 
-# No named volumes: runners use tmpfs only; per-job networks are created by the controller.
+volumes:
+  deployer-state:   # only hook retry markers; runner jobs still use tmpfs only
 
 networks:
   # Service↔proxy pairs share a /26 network. No service can reach another
