@@ -419,7 +419,7 @@ GET http://<server>:HEALTH_PORT/health
 |---|---|
 | `200 {"status":"ok","ts":"..."}` | Last cycle completed cleanly |
 | `503 {"status":"starting"}` | The deployer has not finished its first cycle yet |
-| `503 {"status":"unhealthy","reason":"...","ts":"..."}` | A deploy is failing: signature verification, image pull, `docker compose up`, self-update or a blocking post-deploy hook. Retried every cycle; stays `503` until it succeeds |
+| `503 {"status":"unhealthy","reason":"...","ts":"..."}` | A deploy or plugin configuration is failing: signature verification, image pull, `docker compose up`, self-update, malformed descriptor or a blocking post-deploy hook. Retried every cycle while the deployer runs |
 | `503 {"status":"stale","age_s":...}` | No cycle finished within `HEALTH_MAX_AGE` — the deployer loop is wedged |
 
 Docker's healthcheck only *marks* the deployer unhealthy; it does not restart it — alert on

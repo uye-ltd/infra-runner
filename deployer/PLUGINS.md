@@ -68,8 +68,9 @@ Every cycle, for each `*.plugin` file in `PLUGINS_DIR`:
    is retried while the deployer stays up; a deployer restart loses that pending state.
 
 Verification, pull, compose and blocking-hook failures set `/health` to 503.
-A malformed descriptor (missing required fields, invalid `PLUGIN_NAME`) is skipped with a
-`warn` log — one bad plugin does not block others.
+A malformed descriptor (missing required fields or invalid `PLUGIN_NAME`) and duplicate
+`PLUGIN_NAME` also set `/health` to 503. Other plugins continue to reconcile.
+Unknown descriptor keys are ignored with a warning.
 
 **Requirements for the plugin's own compose file:** the service's `image:` must be exactly
 `PLUGIN_IMAGE`, and it must not set `pull_policy: always` (which would pull the tag from the
@@ -85,7 +86,8 @@ Hooks run as `timeout <N> env -i <allowlist> bash <script>`:
 - always passed: `PATH`, `HOME`, `DOCKER_HOST` (hooks can use the Docker API through the
   deployer's socket proxy), `PLUGIN_NAME`, `PLUGIN_COMPOSE_DIR`;
 - plus the variables named in the descriptor's `PLUGIN_HOOK_ENV` and in `PLUGIN_HOOK_ENV` from
-  infra-runner's `.env` (operator-wide).
+  infra-runner's `.env` (operator-wide). `GITHUB_TOKEN` and `GITHUB_APP_*` are never passed
+  directly, even when named in an allowlist.
 - **Legacy:** if neither allowlist is set, the hook gets the deployer's full environment
   **except** `GITHUB_TOKEN` and `GITHUB_APP_*`, and the deployer logs a warning once per plugin.
   Declare `PLUGIN_HOOK_ENV` to silence it.

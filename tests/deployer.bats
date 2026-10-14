@@ -236,6 +236,41 @@ EOF
   refute grep -q GITHUB_ORG "${BATS_TEST_TMPDIR}/hook_env"
 }
 
+@test "explicit hook allowlist cannot pass GitHub credentials" {
+  plugin_fixture
+  export GITHUB_APP_PRIVATE_KEY_PATH=/secret/key.pem
+  export PLUGIN_HOOK_ENV="GITHUB_TOKEN,GITHUB_APP_PRIVATE_KEY_PATH,VAULT_TOKEN"
+  cycle
+  [ -f "${BATS_TEST_TMPDIR}/hook_env" ]
+  grep -q VAULT_TOKEN=hvs.x "${BATS_TEST_TMPDIR}/hook_env"
+  refute grep -q GITHUB_TOKEN "${BATS_TEST_TMPDIR}/hook_env"
+  refute grep -q GITHUB_APP_PRIVATE_KEY_PATH "${BATS_TEST_TMPDIR}/hook_env"
+}
+
+@test "missing required plugin field marks health unhealthy" {
+  plugin_fixture
+  sed -i '/^PLUGIN_IMAGE=/d' "${PLUGINS_DIR}/v.plugin"
+  cycle
+  [ "$(hstatus)" = unhealthy ]
+  hreason | grep -q 'missing required field PLUGIN_IMAGE'
+}
+
+@test "invalid plugin name marks health unhealthy" {
+  plugin_fixture
+  sed -i 's/^PLUGIN_NAME=.*/PLUGIN_NAME=bad name/' "${PLUGINS_DIR}/v.plugin"
+  cycle
+  [ "$(hstatus)" = unhealthy ]
+  hreason | grep -q 'Invalid PLUGIN_NAME'
+}
+
+@test "duplicate plugin names mark health unhealthy" {
+  plugin_fixture
+  cp "${PLUGINS_DIR}/v.plugin" "${PLUGINS_DIR}/w.plugin"
+  cycle
+  [ "$(hstatus)" = unhealthy ]
+  hreason | grep -q 'Duplicate PLUGIN_NAME vault-unseal'
+}
+
 @test "a hanging non-blocking hook is killed by its timeout" {
   plugin_fixture
   cat >> "${PLUGINS_DIR}/v.plugin" <<'EOF'

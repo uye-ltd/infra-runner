@@ -371,13 +371,15 @@ them silently disables a plugin (or the deployer's own self/controller updates).
   would bypass verification — the deployer detects the mismatch after `compose up` and reports 503.
 - **Descriptors are parsed as data, never `source`d.** `KEY=VALUE` lines, `${VAR}`/`$VAR`
   expanded from the deployer's exported environment, no command substitution; unknown keys are
-  ignored with a warning.
+  ignored with a warning. Missing required fields, invalid names and duplicate names set
+  `/health` to 503 while other plugins continue.
 - **Hooks are the trust boundary.** Hook scripts are unsigned code from the on-server checkout
   and run inside the deployer, which can reach the Docker API (= root on the host). Anyone who can
   push to a plugin repo that a `git pull` cron follows can execute code here — protect those
   branches (or verify signed commits in the cron). Hooks run under `env -i` with an allowlist
   (`PLUGIN_HOOK_ENV` in the descriptor and/or `.env`); without an allowlist they get the full
-  environment **minus** `GITHUB_TOKEN`/`GITHUB_APP_*` (legacy, warns once). Each hook has a
+  environment **minus** `GITHUB_TOKEN`/`GITHUB_APP_*` (legacy, warns once). These credentials
+  are also denied in explicit allowlists. Each hook has a
   timeout (`PLUGIN_POST_DEPLOY_N_TIMEOUT`, default `PLUGIN_HOOK_TIMEOUT=300`).
 - **on_update hook retries are in memory.** An `on_update` hook runs only after the plugin service is
   observed running on the verified image. An inspection failure keeps the hook pending for

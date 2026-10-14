@@ -375,6 +375,7 @@ reconcile_controller() {
 declare -gA P=()                 # the descriptor being processed
 declare -gA _hooks_pending=()    # plugin name → 1 while a blocking on_update hook keeps failing
 declare -gA _legacy_env_warned=()
+declare -gA _seen_plugins=()      # plugin name → descriptor path within this cycle
 
 _KEY_RE='^(export[[:space:]]+)?([A-Z][A-Z0-9_]*)=(.*)$'
 _HOOK_KEY_RE='^PLUGIN_POST_DEPLOY_[0-9]+_(SCRIPT|RUN|BLOCKING|TIMEOUT)$'
@@ -445,6 +446,12 @@ build_hook_env() {
   if [[ -n "${allow// /}" ]]; then
     for name in ${allow//,/ }; do
       [[ "${name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+      case "${name}" in
+        GITHUB_TOKEN|GITHUB_APP_*)
+          log warn "GitHub credential cannot be passed to a plugin hook" plugin "${P[PLUGIN_NAME]}" var "${name}"
+          continue
+          ;;
+      esac
       [[ "$(declare -p "${name}" 2>/dev/null)" == "declare -x"* ]] && _hook_env+=("${name}=${!name}")
     done
     return 0
@@ -503,14 +510,19 @@ process_plugin() {
   local k
   for k in PLUGIN_NAME PLUGIN_IMAGE PLUGIN_CERT_IDENTITY PLUGIN_COMPOSE_PROJECT PLUGIN_COMPOSE_DIR PLUGIN_COMPOSE_SERVICE; do
     if [[ -z "${P[${k}]:-}" ]]; then
-      log warn "Plugin descriptor missing required field — skipping" file "${descriptor}" field "${k}"
+      set_unhealthy "Plugin descriptor ${descriptor} missing required field ${k}"
       return 0
     fi
   done
   if [[ ! "${P[PLUGIN_NAME]}" =~ ^[A-Za-z0-9-]+$ ]]; then
-    log warn "Invalid PLUGIN_NAME (alphanumerics and hyphens only) — skipping" file "${descriptor}"
+    set_unhealthy "Invalid PLUGIN_NAME in ${descriptor} (alphanumerics and hyphens only)"
     return 0
   fi
+  if [[ -n "${_seen_plugins[${P[PLUGIN_NAME]}]:-}" ]]; then
+    set_unhealthy "Duplicate PLUGIN_NAME ${P[PLUGIN_NAME]} in ${descriptor} and ${_seen_plugins[${P[PLUGIN_NAME]}]}"
+    return 0
+  fi
+  _seen_plugins[${P[PLUGIN_NAME]}]="${descriptor}"
 
   local name="${P[PLUGIN_NAME]}" service_verified=false
   log info "Checking plugin" plugin "${name}" image "${P[PLUGIN_IMAGE]}"
@@ -559,6 +571,7 @@ process_plugin() {
 run_plugins() {
   [[ -d "${PLUGINS_DIR}" ]] || return 0
   local descriptor files=()
+  _seen_plugins=()
   shopt -s nullglob
   files=("${PLUGINS_DIR%/}"/*.plugin)
   shopt -u nullglob
