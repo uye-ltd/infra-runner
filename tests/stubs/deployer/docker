@@ -22,7 +22,10 @@ case "$1" in
   tag) cp "${ST}/img_$(k "$2")" "${ST}/img_$(k "$3")" ;;
   ps)
     svc=$(printf '%s\n' "$@" | sed -n 's/^label=com.docker.compose.service=//p')
-    [[ -n "${svc}" && -f "${ST}/ctr_${svc}" && ! -f "${ST}/stopped_${svc}" ]] && echo "cid_${svc}"
+    if [[ -n "${svc}" && -f "${ST}/ctr_${svc}" && ! -f "${ST}/stopped_${svc}" ]]; then
+      echo "cid_${svc}"
+      [[ -f "${ST}/duplicate_${svc}" ]] && echo "cid_${svc}_extra"
+    fi
     exit 0 ;;
   inspect)
     if [[ "$2" == cid_* ]]; then

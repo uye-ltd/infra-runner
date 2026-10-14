@@ -353,6 +353,8 @@ on the verified image before reporting success. Pending `on_update` hooks are re
 the deployer's `deployer-state` volume before a plugin service update. Failing blocking hooks
 are retried after deployer restarts. Hooks can run again if the deployer stops after the
 hook succeeds but before its pending marker is cleared, so hook scripts must be idempotent.
+Each managed Compose service must have one running container; duplicate containers make
+`/health` return 503 until the extra instances are removed.
 If the new deployer starts with an older Compose file that lacks this volume, plugin updates
 pause and `/health` reports 503 until `docker compose up -d` applies the new file.
 Promotion starts only when all three images pass their build, signature and CRITICAL scan.

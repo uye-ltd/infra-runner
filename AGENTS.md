@@ -355,6 +355,8 @@ reason; the end-of-cycle write reports `ok` only if no reason was recorded. Beca
 vs actual is re-evaluated every cycle, a failing deploy keeps `/health` at 503 until it
 succeeds — including across deployer restarts. The health server returns 503 `stale` if the
 file is older than `HEALTH_MAX_AGE` (wedged loop), and the loop restarts the server if it dies.
+Each managed Compose service has one running container; multiple matches for the same
+project/service labels make inspection ambiguous and report 503 without an update attempt.
 
 **Functions return data through globals** (`_digest`, `_desired_id`, `_actual_id`, `P[]`),
 not `$(…)`: they call `set_unhealthy`, and a reason recorded inside a subshell would be lost.

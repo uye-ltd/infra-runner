@@ -217,7 +217,8 @@ sync_image() {
   [[ -n "${_desired_id}" ]]
 }
 
-# compose_container_image PROJECT SERVICE → _actual_id ("" if no running container exists)
+# compose_container_image PROJECT SERVICE → _actual_id ("" if no running container exists).
+# Each managed Compose service must have exactly one running container.
 compose_container_image() {
   local ids
   _actual_id=""
@@ -227,7 +228,12 @@ compose_container_image() {
           --filter "label=com.docker.compose.service=$2" \
           --format '{{.ID}}') || return 1
   [[ -n "${ids}" ]] || return 0
-  _actual_id=$(docker inspect "${ids%%$'\n'*}" --format '{{.Image}}') || return 1
+  if [[ "${ids}" == *$'\n'* ]]; then
+    log error "Multiple running containers for managed Compose service" project "$1" service "$2"
+    set_unhealthy "Multiple running containers for Compose service $1/$2"
+    return 1
+  fi
+  _actual_id=$(docker inspect "${ids}" --format '{{.Image}}') || return 1
 }
 
 _last_prune=0

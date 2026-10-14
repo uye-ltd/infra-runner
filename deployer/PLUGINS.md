@@ -81,7 +81,9 @@ Unknown descriptor keys are ignored with a warning.
 **Requirements for the plugin's own compose file:** the service's `image:` must be exactly
 `PLUGIN_IMAGE`, and it must not set `pull_policy: always` (which would pull the tag from the
 registry, bypassing verification). The deployer re-checks the container after `compose up` and
-reports 503 if it is still not on the verified image.
+reports 503 if it is still not on the verified image. The deployer manages one running
+container per Compose service; scaling a managed service to multiple replicas makes its
+image state ambiguous and reports 503 until the extra containers are removed.
 
 ---
 

@@ -149,6 +149,32 @@ baseline() {
   [ "$(hstatus)" = ok ]
 }
 
+@test "duplicate deployer containers block self-update and keep health unhealthy" {
+  baseline
+  sig infra-runner-controller sha256:c1; have infra-runner-controller sha256:c1; running controller id-sha256:c1
+  touch "${ST}/duplicate_deployer"
+  cycle
+  [ "$(hstatus)" = unhealthy ]
+  hreason | grep -q 'Multiple running containers for Compose service infra-runner/deployer'
+  hreason | grep -q 'Cannot inspect the deployer container'
+  refute grep -q '^docker run' "${CALLS}"
+}
+
+@test "duplicate controller containers block update and keep health unhealthy" {
+  baseline
+  sig infra-runner-controller sha256:c2; running controller id-sha256:c1
+  touch "${ST}/duplicate_controller"
+  cycle
+  [ "$(hstatus)" = unhealthy ]
+  hreason | grep -q 'Multiple running containers for Compose service infra-runner/controller'
+  hreason | grep -q 'Cannot inspect the controller container'
+  refute grep -q 'compose .*up -d --no-deps controller' "${CALLS}"
+  rm "${ST}/duplicate_controller"
+  cycle
+  [ "$(hstatus)" = ok ]
+  [ "$(cat "${ST}/ctr_controller")" = id-sha256:c2 ]
+}
+
 @test "controller inspect failure after compose up stays unhealthy" {
   baseline
   sig infra-runner-controller sha256:c2; running controller id-sha256:c1
@@ -211,6 +237,16 @@ EOF
   echo "env > ${BATS_TEST_TMPDIR}/hook_env" > "${BATS_TEST_TMPDIR}/pw/env.sh"
   echo "ghcr.io/acme/vault-unseal:latest" > "${ST}/svcref_vault-unseal"
   running vault-unseal id-old
+}
+
+@test "duplicate plugin containers block update and keep health unhealthy" {
+  plugin_fixture
+  touch "${ST}/duplicate_vault-unseal"
+  cycle
+  [ "$(hstatus)" = unhealthy ]
+  hreason | grep -q 'Multiple running containers for Compose service infra-vault/vault-unseal'
+  hreason | grep -q 'Cannot inspect plugin container for vault-unseal'
+  refute grep -q 'compose .*up -d --no-deps vault-unseal' "${CALLS}"
 }
 
 @test "plugin descriptor is parsed as data: command substitution never runs" {
