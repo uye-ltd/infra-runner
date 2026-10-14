@@ -1,0 +1,69 @@
+name: CI
+
+# Lint + tests on every PR and push to main. Tools run from digest-pinned images so the
+# same versions can be used locally (see the commands in each step).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  SHELLCHECK_IMAGE: koalaman/shellcheck:v0.10.0@sha256:2097951f02e735b613f4a34de20c40f937a6c8f18ecb170612c88c34517221fb
+  HADOLINT_IMAGE: hadolint/hadolint:v2.12.0@sha256:30a8fd2e785ab6176eed53f74769e04f125afb2f74a6c52aef7d463583b6d45e
+  ACTIONLINT_IMAGE: rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
+  ZIZMOR_IMAGE: ghcr.io/zizmorcore/zizmor:1.11.0@sha256:732696b82d9010ea395085f1b620d834ab87c26e6696f46227755bf4bc1ad3f7
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: shellcheck
+        run: |
+          docker run --rm -v "${PWD}:/mnt:ro" -w /mnt "${SHELLCHECK_IMAGE}" -x -P scripts \
+            entrypoint.sh controller/entrypoint.sh deployer/entrypoint.sh scripts/*.sh \
+            tests/run.sh tests/stubs/*/*
+
+      - name: hadolint
+        run: |
+          docker run --rm -v "${PWD}:/w:ro" -w /w "${HADOLINT_IMAGE}" \
+            hadolint Dockerfile controller/Dockerfile deployer/Dockerfile tests/Dockerfile
+
+      - name: actionlint
+        run: docker run --rm -v "${PWD}:/repo:ro" -w /repo "${ACTIONLINT_IMAGE}" -color
+
+      - name: zizmor (workflow security)
+        run: docker run --rm -v "${PWD}:/repo:ro" "${ZIZMOR_IMAGE}" --offline /repo/.github/workflows
+
+      - name: docker compose config
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          rm .env
+
+      - name: python syntax
+        run: python3 -m py_compile deployer/health_server.py tests/test_health_server.py
+
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: bats + unittest (in container)
+        run: bash tests/run.sh

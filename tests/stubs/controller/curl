@@ -1,0 +1,11 @@
+#!/bin/bash
+# Stub curl for tests/controller.bats: fakes the GitHub REST API. Output mimics
+# `curl -w '\n%{http_code}'`.
+echo "curl $*" >> "${CALLS}"
+url="${*: -1}"
+[[ -f "${ST}/api_fail" ]] && { printf 'err\n500'; exit 0; }
+case "${url}" in
+  *"actions/runners?per_page"*) printf '%s\n200' "$(cat "${ST}/gh_runners")" ;;
+  *generate-jitconfig)          printf '{"runner":{"id":77},"encoded_jit_config":"JITXYZ"}\n201' ;;
+  *actions/runners/*)           printf '\n404' ;;
+esac

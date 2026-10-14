@@ -1,6 +1,9 @@
 # Digest-pinned; Dependabot bumps tag + digest together.
 FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
 
+# pipefail: a failed curl in `curl … | gpg/sha256sum` must fail the build.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 ARG RUNNER_VERSION=2.334.0
 ARG RUNNER_SHA256=048024cd2c848eb6f14d5646d56c13a4def2ae7ee3ad12122bee960c56f3d271
 
@@ -69,8 +72,8 @@ RUN apt-get update \
 # GitHub-hosted runners where the connection succeeds. Same pattern as Vault.
 # Version AND SHA256 pinned here: a checksum file downloaded from the same release only
 # detects corruption, not a swapped asset. Bump both (and cosign-release in vault's ci.yml).
-RUN cd /tmp \
-    && curl -fsSL \
+WORKDIR /tmp
+RUN curl -fsSL \
       "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64" \
       -o cosign-linux-amd64 \
     && echo "${COSIGN_SHA256}  cosign-linux-amd64" | sha256sum -c - \

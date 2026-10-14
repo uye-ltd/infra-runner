@@ -1,0 +1,5 @@
+# hadolint configuration (used by .github/workflows/ci.yml)
+ignored:
+  # Pinning apt package versions breaks builds whenever Ubuntu updates a package; the
+  # base image is digest-pinned and rebuilt by Dependabot instead.
+  - DL3008

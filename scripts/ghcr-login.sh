@@ -11,7 +11,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # (outside of a docker-compose environment that would inject the vars).
 if [[ -f "${REPO_ROOT}/.env" ]]; then
   set -a
-  # shellcheck source=../.env
+  # shellcheck source=/dev/null  # operator-provided, not in the repo
   source "${REPO_ROOT}/.env"
   set +a
 fi

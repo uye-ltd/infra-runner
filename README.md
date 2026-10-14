@@ -428,9 +428,23 @@ docker compose up -d
 
 ---
 
+## Development
+
+```bash
+bash tests/run.sh   # bats (controller + deployer logic) + unittest (health server), in a container
+```
+
+CI (`.github/workflows/ci.yml`) runs shellcheck, hadolint, actionlint, zizmor,
+`docker compose config` and the test suite on every PR; `deploy.yml` builds and
+trivy-scans the images. See AGENTS.md → *Tests* for the conventions the tests rely on.
+
+---
+
 ## Updating the runner binary
 
 Bump **both** `RUNNER_VERSION` and `RUNNER_SHA256` in `Dockerfile` and push to `main`.
+`.github/workflows/runner-version.yml` fails weekly while a newer release exists and prints
+both lines ready to paste.
 CI rebuilds all three images, signs them, and the deployer verifies and applies the update.
 
 ```dockerfile

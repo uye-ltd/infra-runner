@@ -1,6 +1,9 @@
 # Digest-pinned; Dependabot bumps tag + digest together.
 FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
 
+# pipefail: a failed curl in `curl … | gpg/sha256sum` must fail the build.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # System dependencies:
 #   curl + jq  — GitHub API calls and JSON parsing in entrypoint.sh
 #   docker-ce-cli — Docker CLI for spawning/managing per-job containers via the socket proxy

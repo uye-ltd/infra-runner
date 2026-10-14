@@ -1,0 +1,26 @@
+#!/bin/bash
+# Stub docker CLI for tests/controller.bats. State lives in files under $ST; every call is
+# appended to $CALLS.
+echo "docker $*" >> "${CALLS}"
+case "$1" in
+  ps)
+    [[ -f "${ST}/ps_fail" ]] && exit 1
+    if [[ "$*" == *status=exited* ]]; then cat "${ST}/exited" 2>/dev/null
+    elif [[ "$2" == -a ]]; then cat "${ST}/all_ids" 2>/dev/null
+    else cat "${ST}/running" 2>/dev/null; fi
+    exit 0 ;;
+  network)
+    if [[ "$2" == ls ]]; then cat "${ST}/nets" 2>/dev/null; exit 0; fi
+    if [[ "$2" == create && -f "${ST}/overlaps" ]]; then
+      n=$(cat "${ST}/overlaps")
+      if (( n > 0 )); then
+        echo $(( n - 1 )) > "${ST}/overlaps"
+        echo "Error response from daemon: Pool overlaps with other one on this address space" >&2
+        exit 1
+      fi
+    fi
+    exit 0 ;;
+  image) [[ -f "${ST}/no_image" ]] && exit 1; exit 0 ;;
+  run)   [[ -f "${ST}/run_fail" ]] && exit 1; echo cid ;;
+  rm)    exit 0 ;;
+esac

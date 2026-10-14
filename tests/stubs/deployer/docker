@@ -1,0 +1,39 @@
+#!/bin/bash
+# Stub docker CLI for tests/deployer.bats. Images: $ST/img_<ref> holds an image ID.
+# Containers: $ST/ctr_<service> holds the running image ID; compose up sets it to the ID
+# of the ref in $ST/svcref_<service>. Self-update helper: $ST/helper_exit.
+echo "docker $*" >> "${CALLS}"
+k() { printf '%s' "$1" | tr '/:@' '___'; }
+case "$1" in
+  image)
+    case "$2" in
+      inspect)
+        f="${ST}/img_$(k "$3")"; [[ -f "${f}" ]] || exit 1
+        [[ "$*" == *--format* ]] && cat "${f}"
+        exit 0 ;;
+      prune) exit 0 ;;
+    esac ;;
+  pull)
+    ref="${*: -1}"
+    [[ -f "${ST}/pull_fail" ]] && { echo "pull error" >&2; exit 1; }
+    echo "id-${ref##*@}" > "${ST}/img_$(k "${ref}")" ;;
+  tag) cp "${ST}/img_$(k "$2")" "${ST}/img_$(k "$3")" ;;
+  ps)
+    svc=$(printf '%s\n' "$@" | sed -n 's/^label=com.docker.compose.service=//p')
+    [[ -n "${svc}" && -f "${ST}/ctr_${svc}" ]] && echo "cid_${svc}"
+    exit 0 ;;
+  inspect)
+    if [[ "$2" == cid_* ]]; then cat "${ST}/ctr_${2#cid_}"; exit 0; fi
+    [[ -f "${ST}/helper_state" ]] || exit 1
+    cat "${ST}/helper_state" ;;
+  compose)
+    svc="${*: -1}"
+    [[ -f "${ST}/compose_fail" ]] && exit 1
+    ref=$(cat "${ST}/svcref_${svc}")
+    cp "${ST}/img_$(k "${ref}")" "${ST}/ctr_${svc}" ;;
+  run)
+    [[ -f "${ST}/helper_exit" ]] && echo "exited $(cat "${ST}/helper_exit")" > "${ST}/helper_state"
+    echo cid ;;
+  logs) echo "compose: no such file docker-compose.yml" ;;
+  rm) exit 0 ;;
+esac

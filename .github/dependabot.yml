@@ -1,27 +1,23 @@
 version: 2
 updates:
-  # Runner image (Dockerfile) + socket proxy image (docker-compose.yml)
-  # Dependabot's Docker ecosystem scans both Dockerfiles and docker-compose.yml
-  # in the target directory, so this single entry covers the root Dockerfile
-  # (runner) and the tecnativa/docker-socket-proxy version in docker-compose.yml.
+  # Dockerfiles: FROM lines (tag + digest). ARG-pinned versions (RUNNER_VERSION,
+  # COSIGN_VERSION, VAULT_VERSION) are not tracked by Dependabot — RUNNER_VERSION is
+  # checked by .github/workflows/runner-version.yml.
   - package-ecosystem: docker
+    directories: [/, /controller, /deployer, /tests]
+    schedule:
+      interval: weekly
+
+  # docker-compose.yml (tecnativa/docker-socket-proxy digest). The `docker` ecosystem
+  # only reads Dockerfiles; compose files need their own ecosystem.
+  - package-ecosystem: docker-compose
     directory: /
     schedule:
       interval: weekly
 
-  # Controller image
-  - package-ecosystem: docker
-    directory: /controller
-    schedule:
-      interval: weekly
-
-  # Deployer image (Dockerfile + cosign ARG version)
-  - package-ecosystem: docker
-    directory: /deployer
-    schedule:
-      interval: weekly
-
-  # GitHub Actions versions in the CI workflow
+  # GitHub Actions in .github/workflows (SHA-pinned `uses:`). Tool images referenced in
+  # `run:` steps (shellcheck, hadolint, actionlint, zizmor, trivy) are pinned by digest
+  # and must be bumped manually.
   - package-ecosystem: github-actions
     directory: /
     schedule:

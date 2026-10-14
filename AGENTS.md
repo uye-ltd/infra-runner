@@ -41,10 +41,20 @@ no SSH push from CI is required.
 │   └── setup-egress-policy.sh        # one-time, idempotent: iptables chains INFRA-RUNNER-FWD/-IN for the runner range
 ├── seccomp/
 │   └── runner-profile.json           # seccomp deny-list: blocks kernel-escape syscalls
+├── tests/
+│   ├── run.sh                        # runs the suite in a container (same locally and in CI)
+│   ├── Dockerfile                    # test env: ubuntu + bats + jq + python3
+│   ├── controller.bats               # controller reconcile logic vs stubbed docker / GitHub API
+│   ├── deployer.bats                 # deployer reconcile + plugin logic vs stubbed docker / cosign
+│   ├── test_health_server.py         # health server (stdlib unittest)
+│   └── stubs/{controller,deployer}/  # fake docker, cosign, curl, uuidgen (state in files)
+├── .hadolint.yaml
 └── .github/
-    ├── dependabot.yml                # weekly PRs for Docker image + Actions version updates
+    ├── dependabot.yml                # weekly PRs: Dockerfiles, docker-compose.yml, Actions
     └── workflows/
-        └── deploy.yml                # CI: build + push + cosign-sign runner/controller/deployer images
+        ├── ci.yml                    # lint (shellcheck, hadolint, actionlint, zizmor, compose config) + tests
+        ├── deploy.yml                # PR: build + trivy; main: build, push, cosign-sign by digest
+        └── runner-version.yml        # weekly: fail if actions/runner is newer than ARG RUNNER_VERSION
 ```
 
 ---
@@ -452,40 +462,62 @@ The base `docker-compose.yml` is unchanged; each plugin is strictly opt-in.
 
 ---
 
-## CI workflow (`.github/workflows/deploy.yml`)
+## CI workflows
 
-Triggered on push to `main`. Runs on GitHub-hosted runners. All `uses:` action references
-are pinned to full commit SHAs (not version tags) to prevent supply-chain substitution.
-Dependabot sends update PRs when new versions are released.
+All `uses:` references are pinned to full commit SHAs; tool images in `run:` steps are pinned
+by digest. Every workflow starts from `permissions: {}` and grants per job.
+
+**`deploy.yml`** — matrix over runner / controller / deployer:
 
 ```
-1. actions/checkout@<sha>          (v6.0.2)
-2. sigstore/cosign-installer@<sha> (v4.1.1, push events only)
-3. docker/login-action@<sha>       (v4.1.0, push events only) → ghcr.io
-4. docker/build-push-action@<sha>  (v7.1.0)
-     build-push runner image     (context: .)
-     build-push controller image (context: ., dockerfile: controller/Dockerfile)
-     build-push deployer image   (context: ., dockerfile: deployer/Dockerfile)
-     → each image: ghcr.io/{org}/{name}:{latest,sha}
-5. cosign sign (push events only):
-     cosign sign --yes --registry-username $GITHUB_ACTOR --registry-password $GITHUB_TOKEN \
-       runner@{digest}
-     cosign sign --yes --registry-username $GITHUB_ACTOR --registry-password $GITHUB_TOKEN \
-       controller@{digest}
-     cosign sign --yes --registry-username $GITHUB_ACTOR --registry-password $GITHUB_TOKEN \
-       deployer@{digest}
-     (keyless — signature is tied to this workflow's GitHub Actions OIDC identity)
+pull_request → job build   (contents: read)
+                 checkout (persist-credentials: false) → build (no push) → trivy scan
+push to main → job publish (contents: read, packages: write, id-token: write)
+                 checkout → cosign-installer (v2.2.4) → login ghcr.io
+                 → build + push ghcr.io/{owner}/{image}:{latest,sha}
+                 → cosign sign --yes {image}@{digest}   (keyless; auth from the login step)
+                 → trivy scan
 ```
 
-On `pull_request` events: images are built but not pushed and not signed (login and
-cosign steps are skipped). Fork PRs cannot push to GHCR.
+- `concurrency`: publishes are serialised (`cancel-in-progress: false`), so an older build can
+  never finish last and move `:latest` backwards; PR builds of the same ref cancel each other.
+- Trivy is report-only (`TRIVY_EXIT_CODE: 0`); set it to `1` to block on fixable HIGH/CRITICAL.
+- `${{ }}` expressions are passed to `run:` via `env:` only (no template injection — zizmor).
 
-**Build context**: all three images use `.` (repo root) as the build context. The
-controller and deployer Dockerfiles copy `scripts/logging.sh` from the root before
-copying their own entrypoints.
+**`ci.yml`** — `lint` (shellcheck, hadolint with `.hadolint.yaml`, actionlint, zizmor
+`--offline`, `docker compose config` with `.env.example`, py_compile) and `test`
+(`bash tests/run.sh`).
+
+**`runner-version.yml`** — weekly; fails with an annotation containing the exact
+`ARG RUNNER_VERSION` / `ARG RUNNER_SHA256` lines when actions/runner has a newer release.
+
+**Build context**: all three images use `.` (repo root) as the build context; the root
+`.dockerignore` applies to all of them.
 
 No SSH secrets are needed. Remove `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`
 from repo secrets if previously set.
+
+---
+
+## Tests
+
+```bash
+bash tests/run.sh      # builds tests/Dockerfile, runs bats + unittest in a container
+```
+
+The entrypoints only run `main` when executed, so tests `source` them and call functions
+directly against stubs in `tests/stubs/` (state kept in files under `$ST`, every call logged
+to `$CALLS`). Conventions that matter:
+
+- Call `reconcile` / `run_cycle` as `if reconcile; …` — production relies on errexit being
+  ignored inside them.
+- Use `refute cmd` for negative assertions. `! cmd` never fails a bats test (bash ignores
+  errexit for negated commands).
+- Variables whose defaults are computed at source time (e.g. `RUNNER_APPARMOR_PROFILE`) must
+  be exported **before** sourcing.
+- Global associative arrays are declared with `declare -gA` so the scripts also work when
+  sourced from a function (bats `setup`).
+- `BATS_TEST_TIMEOUT=60` turns a hang into a failure.
 
 ---
 

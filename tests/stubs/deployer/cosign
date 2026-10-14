@@ -1,0 +1,14 @@
+#!/bin/bash
+# Stub cosign for tests/deployer.bats. $ST/sig_<repo with /:@ → _> holds a digest
+# (verified), BAD (signature mismatch) or NET (network error); missing = no signature.
+ref="${*: -1}"
+key=$(printf '%s' "${ref%:*}" | tr '/:@' '___')
+echo "cosign ${ref}" >> "${CALLS}"
+f="${ST}/sig_${key}"
+[[ -f "${f}" ]] || { echo "Error: no signatures found" >&2; exit 1; }
+v=$(cat "${f}")
+case "${v}" in
+  NET*) echo "Error: GET https://ghcr.io: dial tcp: i/o timeout" >&2; exit 1 ;;
+  BAD*) echo "Error: no matching signatures: none of the expected identities matched" >&2; exit 1 ;;
+esac
+printf '[{"critical":{"image":{"docker-manifest-digest":"%s"}}}]\n' "${v}"

@@ -142,7 +142,7 @@ gh_api() {
 
 # Populates _GH_BUSY[name]=true|false and _GH_ID[name]=id for this controller's runners
 # (name prefix runner-job-). Must run in the current shell (not $(...)) to keep the maps.
-declare -A _GH_BUSY=() _GH_ID=()
+declare -gA _GH_BUSY=() _GH_ID=()
 load_org_runners() {
   _GH_BUSY=(); _GH_ID=()
   local page=1 body n name busy id

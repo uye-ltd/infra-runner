@@ -367,9 +367,9 @@ reconcile_controller() {
 # commands in the deployer. Hook scripts DO run code: they get a minimal environment and
 # a timeout (see run_plugin_hooks). See deployer/PLUGINS.md.
 
-declare -A P=()                 # the descriptor being processed
-declare -A _hooks_pending=()    # plugin name → 1 while a blocking on_update hook keeps failing
-declare -A _legacy_env_warned=()
+declare -gA P=()                 # the descriptor being processed
+declare -gA _hooks_pending=()    # plugin name → 1 while a blocking on_update hook keeps failing
+declare -gA _legacy_env_warned=()
 
 _KEY_RE='^(export[[:space:]]+)?([A-Z][A-Z0-9_]*)=(.*)$'
 _HOOK_KEY_RE='^PLUGIN_POST_DEPLOY_[0-9]+_(SCRIPT|RUN|BLOCKING|TIMEOUT)$'
