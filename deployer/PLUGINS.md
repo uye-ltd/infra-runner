@@ -14,50 +14,96 @@ no changes when a new plugin is added.
 
 ```bash
 # Required fields
-PLUGIN_NAME=my-service           # unique identifier; alphanumeric and hyphens only
+PLUGIN_NAME=my-service           # unique identifier; alphanumerics and hyphens only
 PLUGIN_IMAGE=ghcr.io/org/my-service:latest
 PLUGIN_CERT_IDENTITY=https://github.com/org/my-service/.github/workflows/deploy.yml@refs/heads/main
 PLUGIN_COMPOSE_PROJECT=my-project          # docker compose --project-name
 PLUGIN_COMPOSE_DIR=/workspace-my-service   # container-side path to the external project
 PLUGIN_COMPOSE_SERVICE=my-service          # service name passed to docker compose up
 
+# Optional: env var names (space/comma separated) passed to hook scripts — see below
+PLUGIN_HOOK_ENV="MY_API_TOKEN MY_SERVICE_URL"
+
 # Post-deploy hooks (optional, indexed from 0)
-# PLUGIN_POST_DEPLOY_N_SCRIPT  path relative to PLUGIN_COMPOSE_DIR
-# PLUGIN_POST_DEPLOY_N_RUN     always | on_update  (default: on_update)
+# PLUGIN_POST_DEPLOY_N_SCRIPT    path relative to PLUGIN_COMPOSE_DIR
+# PLUGIN_POST_DEPLOY_N_RUN       always | on_update  (default: on_update)
 # PLUGIN_POST_DEPLOY_N_BLOCKING  true | false       (default: true)
+# PLUGIN_POST_DEPLOY_N_TIMEOUT   seconds, 1–3600    (default: PLUGIN_HOOK_TIMEOUT, 300)
 #
-# run: always   → script runs every poll cycle regardless of whether a new image was deployed
-# run: on_update → script runs only when a new image was pulled and deployed
+# run: always    → script runs every poll cycle regardless of whether a new image was deployed
+# run: on_update → script runs after the service was recreated on a new verified image, and
+#                  again every cycle while a blocking on_update hook keeps failing
 # blocking: false → failure is logged as a warning; does NOT set the health endpoint to unhealthy
 PLUGIN_POST_DEPLOY_0_SCRIPT=scripts/post-deploy.sh
 PLUGIN_POST_DEPLOY_0_RUN=always
 PLUGIN_POST_DEPLOY_0_BLOCKING=false
 ```
 
-Variables expand from the deployer's environment at source time, so you can reference
-env vars that are set in `.env` (e.g. `PLUGIN_CERT_IDENTITY=${MY_CERT_IDENTITY}`).
+**The descriptor is parsed as data — it is never `source`d.** Supported syntax:
+
+- `KEY=VALUE` lines (an `export ` prefix is allowed), blank lines and `#` comments;
+- `"double quotes"` → variables are expanded; `'single quotes'` → literal;
+- unquoted values: a trailing ` # comment` is stripped;
+- `${NAME}` / `$NAME` expand from the deployer's **exported** environment (everything in
+  infra-runner's `.env`), e.g. `PLUGIN_CERT_IDENTITY=${MY_CERT_IDENTITY}`. Nothing else is
+  evaluated — `$(…)`, backticks and arithmetic stay literal text;
+- unknown keys are ignored with a warning.
 
 ---
 
 ## How the deployer processes a descriptor
 
-For each `*.plugin` file found in `PLUGINS_DIR`:
+Every cycle, for each `*.plugin` file in `PLUGINS_DIR`:
 
-1. `pull_if_new PLUGIN_IMAGE` — returns non-zero if no new digest; hooks still run if `run: always`
-2. `verify_image PLUGIN_IMAGE PLUGIN_CERT_IDENTITY` — cosign keyless verify; sets unhealthy on failure
-3. `docker compose --project-name PLUGIN_COMPOSE_PROJECT --project-directory PLUGIN_COMPOSE_DIR up -d --no-deps PLUGIN_COMPOSE_SERVICE`
-4. Post-deploy hooks run per their `run` and `blocking` rules
+1. `cosign verify PLUGIN_IMAGE` with `PLUGIN_CERT_IDENTITY` → the digest cosign verified.
+2. Pull exactly that digest (if not already present) and tag it as `PLUGIN_IMAGE` and
+   `<repo>:verified`. An unverified image is never pulled.
+3. If the plugin service container (found via compose labels `PLUGIN_COMPOSE_PROJECT` /
+   `PLUGIN_COMPOSE_SERVICE`) is not running that image:
+   `docker compose --project-name PLUGIN_COMPOSE_PROJECT --project-directory PLUGIN_COMPOSE_DIR up -d --no-deps PLUGIN_COMPOSE_SERVICE`
+   — retried every cycle until it succeeds (also after a deployer restart).
+4. Record the target image in the deployer's persistent `deployer-state` volume **before**
+   changing the service. If the state cannot be saved, the service update is skipped.
+   The deployer also requires this volume to be mounted; apply the updated Compose file
+   after upgrading from a version without `deployer-state`.
+   Confirm the service is running on the verified image. An inspection failure keeps an
+   `on_update` hook pending for the next cycle.
+5. Post-deploy hooks run per their `run` and `blocking` rules. A failing blocking `on_update`
+   hook is retried after deployer restarts until it succeeds on the intended image;
+   non-blocking failures are logged and their marker is cleared. Hooks must
+   be idempotent because a restart between hook success and marker removal can rerun them.
 
-A malformed descriptor (missing required fields or source errors) is skipped with a `warn` log.
-The deployer continues to the next descriptor — one bad plugin does not block others.
+Verification, pull, compose and blocking-hook failures set `/health` to 503.
+A malformed descriptor (missing required fields or invalid `PLUGIN_NAME`) and duplicate
+`PLUGIN_NAME` also set `/health` to 503. Other plugins continue to reconcile.
+Unknown descriptor keys are ignored with a warning.
+
+**Requirements for the plugin's own compose file:** the service's `image:` must be exactly
+`PLUGIN_IMAGE`, and it must not set `pull_policy: always` (which would pull the tag from the
+registry, bypassing verification). The deployer re-checks the container after `compose up` and
+reports 503 if it is still not on the verified image. The deployer manages one running
+container per Compose service; scaling a managed service to multiple replicas makes its
+image state ambiguous and reports 503 until the extra containers are removed.
 
 ---
 
 ## Hook script environment
 
-Hook scripts inherit the deployer's full environment. All variables from `.env` are available,
-including any plugin-specific vars you add (e.g. `VAULT_TOKEN`, `VAULT_ADDR`). Scripts must
-be executable or invoked explicitly with `bash` (the deployer calls `bash <script>`).
+Hooks run as `timeout --kill-after=5s <N> env -i <allowlist> bash <script>`:
+
+- always passed: `PATH`, `HOME`, `DOCKER_HOST` (hooks can use the Docker API through the
+  deployer's socket proxy), `PLUGIN_NAME`, `PLUGIN_COMPOSE_DIR`;
+- plus the variables named in the descriptor's `PLUGIN_HOOK_ENV` and in `PLUGIN_HOOK_ENV` from
+  infra-runner's `.env` (operator-wide). `GITHUB_TOKEN` and `GITHUB_APP_*` are never passed
+  directly, even when named in an allowlist.
+- **Legacy:** if neither allowlist is set, the hook gets the deployer's full environment
+  **except** `GITHUB_TOKEN` and `GITHUB_APP_*`, and the deployer logs a warning once per plugin.
+  Declare `PLUGIN_HOOK_ENV` to silence it.
+
+**Trust boundary.** Hook scripts are unsigned code from the on-server checkout of the plugin
+repo, running inside the deployer with Docker API access (effectively root on the host). Only
+register plugins whose repositories you trust as much as infra-runner itself, protect the
+branch the server's `git pull` cron follows, and consider `git verify-commit` in that cron.
 
 ---
 
@@ -92,7 +138,9 @@ services:
 In infra-runner's `.env`:
 
 ```bash
-COMPOSE_FILE=docker-compose.yml:../my-project/docker-compose.infra-runner.yml
+# List every base file explicitly — once COMPOSE_FILE is set, Compose no longer
+# auto-discovers docker-compose.override.yml (drop it if you have none).
+COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:../my-project/docker-compose.infra-runner.yml
 MY_PROJECT_DIR=/home/ghrunner/my-project
 MY_SERVICE_CERT_IDENTITY=https://github.com/org/my-service/.github/workflows/deploy.yml@refs/heads/main
 ```
@@ -122,8 +170,9 @@ PLUGIN_COMPOSE_PROJECT=infra-vault
 # and docker/.env (VAULT_UNSEAL_KEY) must both live here.
 PLUGIN_COMPOSE_DIR=/workspace-vault/docker
 PLUGIN_COMPOSE_SERVICE=vault-unseal
+PLUGIN_HOOK_ENV="VAULT_TOKEN VAULT_ADDR VAULT_NET VAULT_COMPOSE_DIR"
 
-PLUGIN_POST_DEPLOY_0_SCRIPT=scripts/apply-policies.sh
+PLUGIN_POST_DEPLOY_0_SCRIPT=../scripts/apply-policies.sh
 PLUGIN_POST_DEPLOY_0_RUN=always
 PLUGIN_POST_DEPLOY_0_BLOCKING=false
 ```

@@ -1,0 +1,6 @@
+#!/bin/bash
+if [[ "${1:-}" == -u ]]; then
+  echo 0
+else
+  /usr/bin/id "$@"
+fi

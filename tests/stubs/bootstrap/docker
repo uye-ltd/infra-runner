@@ -1,0 +1,18 @@
+#!/bin/bash
+# Docker/cosign stub for bootstrap-images.bats.
+echo "docker $*" >> "${CALLS}"
+case "$1" in
+  run)
+    ref="${*: -1}"
+    if [[ -f "${ST}/bad_signature" ]]; then
+      echo 'no matching signatures' >&2
+      exit 1
+    fi
+    digest="sha256:$(printf 'a%.0s' {1..64})"
+    [[ "${ref}" == *infra-runner-controller:latest && -f "${ST}/malformed_digest" ]] \
+      && digest=sha256:short
+    printf '[{"critical":{"image":{"docker-manifest-digest":"%s"}}}]\n' "${digest}"
+    ;;
+  pull|tag) exit 0 ;;
+  *) exit 1 ;;
+esac

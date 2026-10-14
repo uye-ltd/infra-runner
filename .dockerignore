@@ -1,4 +1,8 @@
 CLAUDE.md
+AGENTS.md
+.claude/
+.idea/
+*.pem
 README.md
 LICENSE
 

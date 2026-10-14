@@ -1,4 +1,0 @@
-# Only these files are needed in the deployer image
-*
-!entrypoint.sh
-!health_server.py

@@ -1,0 +1,37 @@
+name: Runner version check
+
+# Dependabot does not track ARG versions. This job fails (and annotates the Dockerfile)
+# when actions/runner has a newer release than ARG RUNNER_VERSION, printing the exact
+# ARG lines to paste — including the SHA256 published in the release notes.
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Compare pinned runner version with latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current=$(sed -n 's/^ARG RUNNER_VERSION=//p' Dockerfile)
+          release=$(gh api repos/actions/runner/releases/latest)
+          latest=$(jq -r '.tag_name | ltrimstr("v")' <<< "${release}")
+          if [[ "${current}" == "${latest}" ]]; then
+            echo "actions/runner ${current} is current."
+            exit 0
+          fi
+          sha=$(jq -r '.body' <<< "${release}" \
+                | grep -oP '<!-- BEGIN SHA linux-x64 -->\K[0-9a-f]{64}' | head -1)
+          echo "::error file=Dockerfile::actions/runner ${latest} is available (pinned: ${current}). Update: ARG RUNNER_VERSION=${latest} and ARG RUNNER_SHA256=${sha}"
+          exit 1

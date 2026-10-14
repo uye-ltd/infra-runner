@@ -1,4 +1,8 @@
-FROM ubuntu:24.04
+# Digest-pinned; Dependabot bumps tag + digest together.
+FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+
+# pipefail: a failed curl in `curl … | gpg/sha256sum` must fail the build.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl \
@@ -24,10 +28,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Keyless verification: no private key stored here; trust is anchored to the
 # GitHub Actions OIDC identity that signed the image in CI.
 # Pinned by both version tag and digest so a force-pushed tag cannot substitute a different binary.
-COPY --from=gcr.io/projectsigstore/cosign:v2.4.1@sha256:b03690aa52bfe94054187142fba24dc54137650682810633901767d8a3e15b31 /ko-app/cosign /usr/local/bin/cosign
+COPY --from=ghcr.io/sigstore/cosign/cosign:v3.1.3@sha256:9e5c2f2edc34351160407ca3416c61855bdf9403c3c5936e0f0be7fc261611b8 /ko-app/cosign /usr/local/bin/cosign
 
 COPY scripts/logging.sh /scripts/logging.sh
-COPY scripts/github-app-token.sh /scripts/github-app-token.sh
+COPY scripts/ghcr-auth.sh /scripts/ghcr-auth.sh
 COPY deployer/entrypoint.sh /entrypoint.sh
 COPY deployer/health_server.py /health_server.py
 RUN chmod +x /entrypoint.sh

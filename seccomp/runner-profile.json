@@ -23,7 +23,7 @@
         "bpf"
       ],
       "action": "SCMP_ACT_ERRNO",
-      "comment": "Block kernel-level syscalls that could be used for container escape or host compromise. mount/umount2 are intentionally omitted: fuse-overlayfs requires them, and the AppArmor profile restricts allowed mount types to fstype=fuse.* only."
+      "comment": "Deny-list on a default-ALLOW profile; this file REPLACES Docker's default seccomp profile, so anything not listed here is allowed. Blocks kernel-level syscalls used for container escape or host compromise. mount/umount2 stay allowed (fuse-overlayfs, Buildah); AppArmor does not restrict mount types."
     }
   ]
 }

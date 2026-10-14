@@ -19,9 +19,9 @@ Per job (created and destroyed by the controller):
 └── runner-job-{id}    ephemeral runner (Buildah + fuse-overlayfs primary; Kaniko compat)
 ```
 
-**Controller** maintains a warm pool of idle runners (`DESIRED_IDLE`, default 2). When a runner picks up a job it exits. The controller tears down all per-job resources and spawns a replacement.
+**Controller** keeps `DESIRED_IDLE` runners idle (default 2), up to `MAX_RUNNERS` in total; busy/idle state comes from the GitHub API. A local runner counts as idle only when GitHub explicitly reports it idle and, for JIT runners, its registration ID matches; unknown registrations still count toward the total cap. When a runner finishes its job it exits; the controller tears down its per-job resources and spawns a replacement. A controller restart or update adopts running runners instead of killing them. If a crash leaves a job network without a container, the controller waits 120 seconds from network creation, removes any matching JIT registration in GitHub, then deletes the network. If the GitHub runner list is unavailable or malformed, the controller keeps existing jobs and marks its reconcile cycle unsuccessful; it does not spawn from incomplete busy data. It validates the JIT registration response and confirms a new container is running before counting a spawn as successful. Failed container/network cleanup or GitHub deregistration also fails the cycle and is retried; the controller heartbeat stays stale until a cycle succeeds.
 
-**Runner containers** have no Docker socket and no privileged flag. Image builds use **Buildah** with **fuse-overlayfs** (daemonless, no `--privileged`). The `kaniko` binary is also present for backward compatibility. The controller's credential (GitHub App token or PAT) never enters runner containers — only a short-lived, single-use registration token is injected at spawn time.
+**Runner containers** have no Docker socket and no privileged flag. Image builds use **Buildah** with **fuse-overlayfs** (daemonless, no `--privileged`). The `kaniko` binary is also present for backward compatibility. The controller's credential (GitHub App token or PAT) never enters runner containers — only a single-use JIT runner config is injected at spawn time, and it is removed from the environment before any job step runs.
 
 ---
 
@@ -30,15 +30,41 @@ Per job (created and destroyed by the controller):
 | Threat | Protection |
 |---|---|
 | Malicious job leaves persistent state | Container destroyed after every job (`--ephemeral`) |
-| Privileged container escape | No privileged flag — Buildah + fuse-overlayfs builds in userspace, no DinD |
-| Credential theft | Controller credential (App token or PAT) stays in the controller; runners get only a short-lived registration token |
-| Docker socket abuse | Socket proxy allows only required API endpoints; `EXEC` and `BUILD` disabled on both proxies |
-| Supply chain / image tampering | cosign keyless signing in CI; deployer verifies signature before every pull; runner binary SHA256-verified at build time; CI actions pinned to commit SHAs |
+| Privileged container escape | No `--privileged`, no Docker socket, no DinD — Buildah + fuse-overlayfs. **Runners do hold `CAP_SYS_ADMIN`** (see *Threat model*) |
+| Credential theft | Controller credential (App token or PAT) stays in the controller; runners get only a single-use JIT config, unset before job steps run |
+| Docker socket abuse | Socket proxy allows only required API path groups (`EXEC`, `BUILD`, `AUTH` disabled). It does not inspect request bodies, so controller/deployer remain host-root-equivalent; both run with all capabilities dropped and `no-new-privileges` |
+| Supply chain / image tampering | cosign keyless signing in CI; deployer pulls only the digest cosign verified and the stack runs only the local `:verified` tag; runner binary SHA256-verified at build time; CI actions pinned to commit SHAs |
 | Resource abuse (mining, DoS) | `--memory` and `--cpus` limits on every runner container; socket proxies capped at 128 MB / 0.25 CPU |
-| Network exfiltration / lateral movement | Egress policy: DNS + HTTPS only; private RFC 1918 ranges blocked |
-| Kernel-level container escape | `seccomp/runner-profile.json` blocks `mount`, `kexec_*`, `bpf`, kernel module syscalls |
-| File system / capability abuse | AppArmor profile grants `sys_ptrace` and `sys_admin` (required for buildah user-namespace setup: `proc_setgroups_open` calls `ptrace_may_access`, and full-range uid_map writes require `CAP_SYS_ADMIN`); grants `userns` (Ubuntu 24.04 blocks `clone(CLONE_NEWUSER)` without this); denies `sys_module`, `net_raw`, sysfs writes, kernel tunables, and host credential reads |
-| Stranger PRs triggering jobs | GitHub setting: require approval for outside collaborators (see below) |
+| Network exfiltration / lateral movement | Egress policy: DNS + HTTPS only; private, link-local and CGNAT ranges and the host itself blocked |
+| Kernel-level container escape | `seccomp/runner-profile.json` denies `kexec_*`, kernel-module syscalls, `bpf`, `perf_event_open`, keyring syscalls, `pivot_root`. It is default-ALLOW and replaces Docker's stricter default profile (`mount`, `unshare`, `setns` are allowed) |
+| File system / capability abuse | AppArmor profile grants `sys_ptrace`, `sys_admin`, `userns` and unrestricted `mount` (required for Buildah's user-namespace setup); denies `sys_module`, `net_raw`, `net_admin`, sysfs/cgroupfs writes, kernel tunables and host credential reads — path-based, so best-effort while `mount` is allowed |
+| Stranger PRs triggering jobs | GitHub setting: require approval for outside collaborators (see below); dedicated runner group limited to selected repositories |
+
+### Threat model — residual risks
+
+Read this before pointing public repositories at the runners. Jobs are **untrusted code**;
+the controls above reduce, but do not remove, these risks:
+
+1. **Runners hold `CAP_SYS_ADMIN` with a permissive seccomp profile.** Buildah's user-namespace
+   setup (full-range `/etc/subuid` mapping) needs it; AppArmor allows `mount` without restriction
+   and the custom seccomp profile allows syscalls Docker's default would block. A kernel bug
+   reachable through these interfaces is a host escape. Dropping `SYS_ADMIN` (narrow subuid
+   range + `BUILDAH_ISOLATION=chroot`) is planned but must be validated on the server first.
+2. **Controller and deployer are host-root-equivalent.** The socket proxy filters API paths, not
+   request bodies; whoever controls either container can start a privileged container. Both
+   run with all capabilities dropped and receive no job input.
+3. **Plugin hooks run unsigned code** from on-server git checkouts inside the deployer. Anyone who
+   can push to a plugin repository followed by a `git pull` cron can execute code there — protect
+   those branches (see `deployer/PLUGINS.md`).
+4. **`$GITHUB_WORKSPACE` disk is unbounded** (container writable layer): a job can fill the host
+   disk. `/tmp`, `/root` and `/kaniko` are size-limited tmpfs.
+5. **Egress is restricted, not inspected.** HTTPS to any internet host is allowed, so a job can
+   exfiltrate whatever it can read. IPv6 is not covered by the iptables rules; the controller
+   explicitly disables IPv6 on job networks.
+6. **Runner scope.** Org-level runners serve every repository the runner group allows, and any
+   workflow with `runs-on: self-hosted` matches the default labels. Create a dedicated runner
+   group (**Org settings → Actions → Runner groups**) limited to the intended repositories, set
+   `RUNNER_GROUP_ID`, and only then enable "Allow public repositories" for that group.
 
 ---
 
@@ -46,7 +72,8 @@ Per job (created and destroyed by the controller):
 
 - Docker + Docker Compose v2 on the host
 - The GitHub org slug you want to attach runners to
-- **One** of the following for authentication (used by both controller and deployer):
+- **One** of the following for authentication (the controller uses either; the deployer
+  uses a PAT only for private GHCR images):
   - **GitHub App** (recommended) — a GitHub App installed on the org with
     *Self-hosted runners: Read & write* and *Members: Read* permissions.
     You will need the App ID, installation ID, and a downloaded private key PEM file.
@@ -54,7 +81,8 @@ Per job (created and destroyed by the controller):
     Fine-grained tokens do not support `manage_runners:org`.
 - **GHCR packages must be public** when using a GitHub App. App installation tokens cannot
   authenticate to GHCR regardless of the `Packages: Read` permission — this is a GitHub
-  limitation. The controller and deployer pull images anonymously. To keep packages private,
+  limitation. The deployer pulls images anonymously; the controller uses only a local verified
+  runner image. To keep packages private,
   use a classic PAT with `read:packages` instead.
 
 ---
@@ -64,24 +92,34 @@ Per job (created and destroyed by the controller):
 Run as root before starting the stack for the first time.
 
 ```bash
-# Network egress policy — restricts runner containers to DNS + HTTPS only,
-# blocks private networks, configures Docker address pool for job networks
+# Network egress policy — restricts runner networks to DNS + HTTPS, blocks private
+# ranges and the host itself (idempotent; re-run after editing the script)
 sudo bash ~/infra-runner/scripts/setup-egress-policy.sh
-sudo systemctl restart docker   # required for address pool change to take effect
 
 # AppArmor profile — MAC layer restricting runner capabilities and file access
 sudo bash ~/infra-runner/scripts/setup-apparmor.sh
 # Verify: aa-status | grep infra-runner
 ```
 
-The egress script allocates job networks from `10.89.0.0/16` and adds iptables
-`DOCKER-USER` rules restricting that subnet to DNS and HTTPS only.
+The controller creates every job network with an explicit `/24` from
+`RUNNER_SUBNET_PREFIX.0.0/16` (default `10.89.0.0/16`). The egress script installs two
+dedicated iptables chains for that range — `INFRA-RUNNER-FWD` (jumped from `DOCKER-USER`:
+DNS + HTTPS to the internet only; private, link-local and CGNAT ranges dropped) and
+`INFRA-RUNNER-IN` (jumped from `INPUT`: runners cannot reach services on the host itself,
+except a host-local DNS resolver). Other rules on the host are left untouched. If an older
+version of the script set Docker's `default-address-pools` to the runner range, it prints
+migration steps — that pool placed every other compose network under the runner rules.
+The script requires Docker's iptables firewall backend and checks that `DOCKER-USER` is the
+first unconditional rule in `FORWARD` before changing any rules. It fails if that hook is
+missing or bypassable; Docker's native nftables backend does not provide it. Run the script
+after Docker starts and investigate a preflight failure before starting the controller.
+The controller explicitly creates runner networks with IPv6 disabled.
 
 The AppArmor script installs `apparmor/infra-runner` and loads it. The controller passes
 `--security-opt apparmor=infra-runner` to every runner container.
 
-The controller and deployer services each have their own isolated network in
-`172.20.0.0/24` and are not subject to the runner egress rules.
+The controller and deployer services use fixed subnets in `172.20.0.0/16` and are not
+subject to the runner egress rules.
 
 ---
 
@@ -101,13 +139,14 @@ $EDITOR .env   # required: GITHUB_ORG, COMPOSE_PROJECT_NAME
                # auth — pick one:
                #   GitHub App (recommended): GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID,
                #                             GITHUB_APP_PRIVATE_KEY_PATH
-               #   Static PAT (fallback):    GITHUB_TOKEN
+               #   Static PAT (fallback):    GITHUB_TOKEN, GHCR_USERNAME
 
-# 3. Pull and start
+# 3. Verify, pull and start
 # GitHub App path: packages must be public — no host GHCR auth needed.
 # PAT path with private images: authenticate first:
 #   bash scripts/ghcr-login.sh
-docker compose pull
+# Compose runs the LOCAL tag :verified, which only exists after cosign verification:
+bash scripts/bootstrap-images.sh
 docker compose up -d
 
 # 4. Verify
@@ -139,7 +178,8 @@ Copy `.env.example` to `.env`. Exactly one auth path must be configured:
 | `GITHUB_APP_INSTALLATION_ID` | yes (App) | Numeric org installation ID |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | yes (App) | Container path to the PEM key (mounted `:ro`) |
 
-**Static PAT (backward compat)** — set `GITHUB_TOKEN` and leave the App vars unset.
+**Static PAT (backward compat)** — set `GITHUB_TOKEN` and `GHCR_USERNAME` (the GitHub
+account that owns the PAT), and leave the App vars unset.
 
 **All other variables:**
 
@@ -148,16 +188,29 @@ Copy `.env.example` to `.env`. Exactly one auth path must be configured:
 | `GITHUB_ORG` | yes | — | GitHub org slug (e.g. `acme`) |
 | `GITHUB_REPO` | no | `infra-runner` | Repo name; used to construct the cosign certificate identity |
 | `RUNNER_LABELS` | no | `self-hosted,linux,x64` | Comma-separated runner labels |
-| `DESIRED_IDLE` | no | `2` | Warm idle runners to keep ready |
+| `DESIRED_IDLE` | no | `2` | Idle runners to keep ready (busy runners not counted); 0–256, at most `MAX_RUNNERS` |
+| `MAX_RUNNERS` | no | `DESIRED_IDLE` | Hard cap on runner containers, idle + busy; 0–256 because the runner `/16` has 256 `/24` networks |
+| `RUNNER_PIDS_LIMIT` | no | `4096` | Max processes per runner container |
+| `RUNNER_REGISTRATION_MODE` | no | `jit` | `jit` (single-use) or `token` (legacy, reusable for 1 h) |
+| `RUNNER_GROUP_ID` | no | `1` | Runner group for JIT registration |
+| `SHUTDOWN_CLEANUP` | no | `idle` | On controller stop: `idle`, `all` or `none` |
 | `RUNNER_MEMORY` | no | `4g` | Memory limit per runner container |
 | `RUNNER_CPUS` | no | `2` | CPU limit per runner container |
 | `RUNNER_KANIKO_SIZE` | no | `5g` | tmpfs size for Kaniko scratch space inside runner |
 | `RUNNER_APPARMOR_PROFILE` | no | `infra-runner` | AppArmor profile name; empty to disable |
 | `RUNNER_SECCOMP_HOST_PATH` | no | — | Path to `seccomp/runner-profile.json` as seen from inside the controller container (mounted in via `docker-compose.yml`) |
-| `COMPOSE_PROJECT_NAME` | yes | `infra-runner` | Must match the directory name on the server |
-| `POLL_INTERVAL` | no | `60` | Seconds between GHCR digest checks |
-| `HEALTH_PORT` | no | `8080` | Port for the deployer health endpoint |
-| `CONTROLLER_POLL_INTERVAL` | no | `15` | Seconds between controller pool maintenance cycles |
+| `RUNNER_SUBNET_PREFIX` | no | `10.89` | Job networks get explicit /24s from `<prefix>.0.0/16`; keep in sync with `RUNNER_SUBNET` of `setup-egress-policy.sh` |
+| `GITHUB_APP_PRIVATE_KEY_HOST_PATH` | no | `/home/ghrunner/.ssh/github-app.pem` | Host path of the App key, mounted into the controller |
+| `HEALTH_BIND` | no | `0.0.0.0` | Host address the health port is published on; `127.0.0.1` keeps it off public interfaces (published ports bypass ufw) |
+| `COMPOSE_PROJECT_NAME` | yes | `infra-runner` | Compose project name used by the deployer for every compose call and to find its containers; keep it stable |
+| `POLL_INTERVAL` | no | `60` | Seconds between GHCR digest checks (5–3600) |
+| `HEALTH_PORT` | no | `8080` | Port for the deployer health endpoint (1–65535) |
+| `CONTROLLER_POLL_INTERVAL` | no | `15` | Seconds between controller pool maintenance cycles (1–240; heartbeat expires after 300s) |
+| `SELF_UPDATE_TIMEOUT` | no | `120` | Max seconds to wait for the deployer self-update helper (3–3600) |
+| `PLUGIN_HOOK_TIMEOUT` | no | `300` | Default timeout for plugin post-deploy hooks (1–3600) |
+| `PLUGIN_HOOK_ENV` | no | — | Env var names passed to all plugin hooks (see `deployer/PLUGINS.md`) |
+| `HEALTH_MAX_AGE` | no | derived | Seconds without a finished cycle before `/health` reports `stale` (1–86400) |
+| `PRUNE_INTERVAL` | no | `3600` | Minimum seconds between dangling-image prunes (60–86400) |
 
 **Plugin system** (all optional — each plugin activates via its own Compose overlay):
 
@@ -194,19 +247,17 @@ jobs:
       packages: write
       id-token: write   # required for cosign OIDC keyless signing
     steps:
-      - uses: actions/checkout@v4
+      # Pin third-party actions to full commit SHAs (Dependabot keeps them current).
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Configure Buildah storage
-        run: |
-          printf '[storage]\n  driver = "overlay"\n  graphRoot = "/kaniko"\n  runRoot = "/tmp/buildah-run"\n\n[storage.options]\n\n  [storage.options.overlay]\n    mount_program = "/usr/bin/fuse-overlayfs"\n' \
-            > /etc/containers/storage.conf
 
       - name: Build and push with Buildah
         id: build
@@ -222,7 +273,7 @@ jobs:
           echo "digest=$(cat /tmp/digest.txt)" >> "$GITHUB_OUTPUT"
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003  # v4.1.1
 
       - name: Sign image
         run: |
@@ -231,11 +282,10 @@ jobs:
 ```
 
 Notes:
-- `--isolation=chroot` is required: Ubuntu 24.04's AppArmor profile grants `userns` for working-container setup, but chroot is used for `RUN` instruction execution as defence-in-depth.
-- Runner containers are spawned with `--cap-add SYS_PTRACE --cap-add SYS_ADMIN` — both are required for buildah's user-namespace setup path (the kernel's `proc_setgroups_open` calls `ptrace_may_access` across namespace boundaries, and writing full-range uid_map entries requires `CAP_SYS_ADMIN`). The AppArmor profile explicitly grants these capabilities rather than denying them.
+- `--isolation=chroot` is required: the default OCI isolation would have Buildah start each `RUN` step through an OCI runtime with its own set of namespaces, which this container's capability/AppArmor set is not built for; chroot isolation runs `RUN` steps inside the job container itself.
+- Runner containers are spawned with `--cap-add SYS_PTRACE --cap-add SYS_ADMIN` — both are required for Buildah's user-namespace setup (the kernel's `proc_setgroups_open` calls `ptrace_may_access` across namespace boundaries, and writing full-range uid_map entries requires `CAP_SYS_ADMIN`). The AppArmor profile grants them. See *Threat model*.
 - Sign **by digest**, not by tag — tags are mutable; the deployer verifies by digest.
-- `graphRoot=/kaniko` reuses the controller-mounted tmpfs (`RUNNER_KANIKO_SIZE`, default `5g`). Increase if your image layers are large.
-- `runRoot=/tmp/buildah-run` is required when an explicit `graphRoot` is set (see storage.conf comment in the Configure step).
+- Buildah storage is preconfigured in the image (`/etc/containers/storage.conf`: overlay via fuse-overlayfs, `graphroot=/kaniko`, `runroot=/tmp/buildah-run`) — no setup step is needed. `/kaniko` is the controller-mounted tmpfs (`RUNNER_KANIKO_SIZE`, default `5g`); increase it if your image layers are large.
 
 **Kaniko (compat)**
 
@@ -282,20 +332,44 @@ only what each workflow needs and set the org-level default to read-only:
 
 ```
 push to main
-  → CI builds images on self-hosted runner
-  → CI pushes to GHCR with :latest and :sha tags
-  → CI signs each image with cosign (keyless, OIDC-anchored to the workflow)
-  → deployer detects new digest (every POLL_INTERVAL seconds, default 60s)
-      → new deployer image?      → verify sig → self-update → exit
-      → new controller image?    → verify sig → docker compose up -d controller
-      → always                   → verify runner sig → pre-pull for fast spawns
-      → for each *.plugin in /plugins/ (if any registered):
-          → new plugin image?    → verify sig → docker compose up -d <service>
-          → post-deploy hooks    → run: always | on_update; blocking: true | false
+  → CI runs the same lint, Compose and test checks as bash scripts/verify.sh
+  → CI builds images on GitHub-hosted runners (ubuntu-latest)
+  → CI pushes each image to GHCR by :sha tag
+  → CI signs and scans all three digests, then promotes their verified :sha tags to :latest
+  → deployer, every POLL_INTERVAL seconds (default 60s), for each image:
+      cosign verify :latest → pull exactly the verified digest → tag it :verified (+ :latest)
+      → deployer image ≠ running?   → self-update via helper container
+      → controller image ≠ running? → docker compose up -d controller
+      → runner                      → :verified kept current; the controller spawns from it
+      → for each *.plugin in /plugins/:
+          → plugin image ≠ running? → docker compose up -d <service>
+          → post-deploy hooks        → run: always | on_update; blocking: true | false
 ```
 
-A signature verification failure immediately sets `GET /health` to `503` and skips
-the update — the currently running (verified) image stays in place.
+Unverified images are never pulled: the deployer asks cosign which digest it verified,
+requires a full 64-character SHA-256 digest, and pulls only that digest. The first-start
+bootstrap script applies the same check; compose/controller run only the local `:verified` tag
+(`pull_policy: never`, `docker run --pull never`). A signature failure sets `GET /health` to
+`503` and leaves the running image in place. Because the deployer compares the running
+image with `:verified` every cycle, a failed `compose up` or self-update is retried every
+cycle, including after a deployer restart. The deployer confirms that the service is running
+on the verified image before reporting success. Pending `on_update` hooks are recorded in
+the deployer's `deployer-state` volume before a plugin service update. Failing blocking hooks
+are retried after deployer restarts. Hooks can run again if the deployer stops after the
+hook succeeds but before its pending marker is cleared, so hook scripts must be idempotent.
+Each managed Compose service must have one running container; duplicate containers make
+`/health` return 503 until the extra instances are removed.
+If the new deployer starts with an older Compose file that lacks this volume, plugin updates
+pause and `/health` reports 503 until `docker compose up -d` applies the new file.
+Promotion starts only when all three images pass their build, signature and CRITICAL scan.
+The three registry tag updates are sequential, so a registry failure during promotion can
+still leave a partially updated set until the workflow is rerun.
+The promotion gate is in `scripts/promote-images.sh` and is covered by local stub tests.
+
+**Upgrading a server from the tag-pull deployer:** no action is needed before `git pull` — the
+old deployer self-updates and the new one tags all images `:verified` on its first cycle. After
+updating the checkout (whose compose file now references `:verified`), run `docker compose up -d`
+once.
 
 ---
 
@@ -360,7 +434,12 @@ GET http://<server>:HEALTH_PORT/health
 | Response | Meaning |
 |---|---|
 | `200 {"status":"ok","ts":"..."}` | Last cycle completed cleanly |
-| `503 {"status":"unhealthy","reason":"...","ts":"..."}` | Signature verification failed or `docker compose up` errored |
+| `503 {"status":"starting"}` | The deployer has not finished its first cycle yet |
+| `503 {"status":"unhealthy","reason":"...","ts":"..."}` | A deploy or plugin configuration is failing: signature verification, image pull, `docker compose up`, self-update, malformed descriptor or a blocking post-deploy hook. Retried every cycle while the deployer runs |
+| `503 {"status":"stale","age_s":...}` | No cycle finished within `HEALTH_MAX_AGE` — the deployer loop is wedged |
+
+Docker's healthcheck only *marks* the deployer unhealthy; it does not restart it — alert on
+this endpoint.
 
 Point UptimeRobot, Grafana Synthetic Monitoring, or any HTTP monitor at this endpoint.
 
@@ -386,11 +465,13 @@ curl -s http://localhost:8080/health | jq .
 # List all live per-job containers
 docker ps --filter label=runner-managed=true
 
-# Force respawn all runners (e.g. after changing .env pool settings)
+# Respawn idle runners (e.g. after changing .env pool settings); busy ones finish first
 docker compose restart controller
 
-# Full teardown (in-progress jobs are interrupted)
+# Stop the stack — busy runners keep running until their job ends
 docker compose down
+# Full teardown including in-progress jobs
+docker rm -f $(docker ps -aq --filter label=runner-managed=true --filter label=runner-role=runner)
 
 # Local build after code changes
 docker compose build
@@ -399,9 +480,27 @@ docker compose up -d
 
 ---
 
+## Development
+
+```bash
+bash scripts/verify.sh         # syntax, linters, Compose, bats and unittest; requires Docker
+bash scripts/verify.sh syntax  # host-only syntax checks (no Docker daemon needed)
+```
+
+CI calls the same script for lint and tests; publication waits for those checks on pushes
+to `main`. `deploy.yml` loads PR builds into Docker before scanning them. Fixable HIGH
+vulnerabilities are reported; fixable CRITICAL vulnerabilities block publication. Reviewed
+exceptions go in `.trivyignore.yaml` with an expiration date. The `:latest` tag moves only
+after local checks pass and the digest is signed and passes the scan. See AGENTS.md →
+*Tests* for the test conventions.
+
+---
+
 ## Updating the runner binary
 
 Bump **both** `RUNNER_VERSION` and `RUNNER_SHA256` in `Dockerfile` and push to `main`.
+`.github/workflows/runner-version.yml` fails weekly while a newer release exists and prints
+both lines ready to paste.
 CI rebuilds all three images, signs them, and the deployer verifies and applies the update.
 
 ```dockerfile
@@ -418,8 +517,9 @@ release. The build fails at verification if the hash does not match.
 
 ### Option A — GitHub App (recommended)
 
-GitHub App installation tokens are short-lived (1 hour), auto-refreshed by both the controller
-and the deployer, and scoped to a single installation — no manual rotation required.
+GitHub App installation tokens are short-lived (1 hour), auto-refreshed by the controller,
+and scoped to a single installation — no manual rotation required. The deployer pulls public
+GHCR images anonymously on this path.
 
 > **GHCR access:** GitHub App installation tokens cannot authenticate to GHCR regardless of
 > the App's *Packages: Read* permission. With the App path, **runner images must be public**.
@@ -435,17 +535,14 @@ and the deployer, and scoped to a single installation — no manual rotation req
 3. Install the App on the org and note the **installation ID** (visible in the URL of the
    install page: `github.com/organizations/YOUR_ORG/settings/installations/<id>`).
 4. Generate a private key (PEM) from the App settings page and store it on the server.
-5. Mount the PEM file into **both** the controller and deployer containers and set the three env vars
-   on each service:
+5. Set the App variables in `.env`. `docker-compose.yml` mounts the key into the
+   **controller** only (the deployer needs no GitHub credential):
 
-```yaml
-# In docker-compose.yml, under both controller: and deployer:
-environment:
-  GITHUB_APP_ID: "123456"
-  GITHUB_APP_INSTALLATION_ID: "78901234"
-  GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github_app_key
-volumes:
-  - /path/on/host/github-app.pem:/run/secrets/github_app_key:ro
+```bash
+GITHUB_APP_ID=123456
+GITHUB_APP_INSTALLATION_ID=78901234
+GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github_app_key           # path inside the container
+GITHUB_APP_PRIVATE_KEY_HOST_PATH=/home/ghrunner/.ssh/github-app.pem  # path on the host (default)
 ```
 
 ### Option B — Classic PAT (backward compat)
@@ -460,4 +557,6 @@ Create at: **github.com/settings/tokens → Tokens (classic)**
 | `admin:org` | Required alongside `manage_runners:org` |
 | `read:packages` | Pull runner image from GHCR (if package is private) |
 
-Set `GITHUB_TOKEN=ghp_...` in `.env`. Leave all `GITHUB_APP_*` vars unset.
+Set `GITHUB_TOKEN=ghp_...` and `GHCR_USERNAME=<PAT owner's GitHub username>` in `.env`.
+Leave all `GITHUB_APP_*` vars unset. Existing PAT installations must add `GHCR_USERNAME`
+before updating the controller and deployer images.

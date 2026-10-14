@@ -1,0 +1,47 @@
+#!/bin/bash
+# Stub curl for tests/controller.bats: fakes the GitHub REST API. Output mimics
+# `curl -w '\n%{http_code}'`.
+echo "curl $*" >> "${CALLS}"
+url="${*: -1}"
+[[ -f "${ST}/api_fail" ]] && { printf 'err\n500'; exit 0; }
+case "${url}" in
+  *app/installations/*/access_tokens)
+    if [[ -f "${ST}/app_token_bad" ]]; then
+      printf '{"token":42}'
+    else
+      printf '{"token":"ghs_testtoken"}'
+    fi ;;
+  *registration-token)
+    if [[ -f "${ST}/registration_token_bad" ]]; then
+      printf '{"token":42}\n201'
+    else
+      printf '{"token":"REGXYZ"}\n201'
+    fi ;;
+  *"actions/runners?per_page"*)
+    page="${url##*page=}"
+    [[ -f "${ST}/api_fail_page_${page}" ]] && { printf 'err\n500'; exit 0; }
+    if [[ -f "${ST}/gh_runners_page_${page}" ]]; then
+      printf '%s\n200' "$(cat "${ST}/gh_runners_page_${page}")"
+    else
+      printf '%s\n200' "$(cat "${ST}/gh_runners")"
+    fi ;;
+  *generate-jitconfig)
+    body=""
+    next_is_body=false
+    for arg in "$@"; do
+      if [[ "${next_is_body}" == true ]]; then body="${arg}"; break; fi
+      [[ "${arg}" == --data ]] && next_is_body=true
+    done
+    name=$(jq -r '.name' <<< "${body}")
+    if [[ -f "${ST}/jit_wrong_name" ]]; then name=someone-else; fi
+    if [[ -f "${ST}/jit_missing_id" ]]; then
+      jq -nc --arg name "${name}" '{runner:{name:$name},encoded_jit_config:"JITXYZ"}'
+    elif [[ -f "${ST}/jit_bad_config" ]]; then
+      jq -nc --arg name "${name}" '{runner:{id:77,name:$name},encoded_jit_config:null}'
+    else
+      jq -nc --arg name "${name}" '{runner:{id:77,name:$name},encoded_jit_config:"JITXYZ"}'
+    fi
+    printf '201' ;;
+  *actions/runners/*)
+    if [[ -f "${ST}/delete_fail" ]]; then printf 'err\n500'; else printf '\n404'; fi ;;
+esac

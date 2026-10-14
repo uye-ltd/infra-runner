@@ -32,13 +32,12 @@ generate_installation_token() {
   jwt=$(_make_jwt "${GITHUB_APP_ID}" "${GITHUB_APP_PRIVATE_KEY_PATH}")
 
   local token
-  token=$(curl -fsSL \
+  token=$(curl -fsSL --max-time 30 \
     -X POST \
     -H "Authorization: Bearer ${jwt}" \
     -H "Accept: application/vnd.github+json" \
     "https://api.github.com/app/installations/${GITHUB_APP_INSTALLATION_ID}/access_tokens" \
-    | jq -r '.token // empty')
+    | jq -er '.token | select(type == "string" and length > 0)') || return 1
 
-  [[ -n "${token}" ]] || return 1
   printf '%s' "${token}"
 }

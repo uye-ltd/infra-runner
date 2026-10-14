@@ -1,10 +1,11 @@
-FROM ubuntu:24.04
+# Digest-pinned; Dependabot bumps tag + digest together.
+FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
 
-ARG RUNNER_VERSION=2.334.0
-ARG RUNNER_SHA256=048024cd2c848eb6f14d5646d56c13a4def2ae7ee3ad12122bee960c56f3d271
+# pipefail: a failed curl in `curl … | gpg/sha256sum` must fail the build.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-ARG VAULT_VERSION=1.19.2
-ARG VAULT_SHA256=c6781c3e0ec431f39bcc8f1443d09f3b8944c90c348e91aa13182b4e1fd2797f
+ARG RUNNER_VERSION=2.338.0
+ARG RUNNER_SHA256=af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32
 
 # System dependencies + Docker CLI (for `docker login` — no daemon needed for credential storage)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -28,8 +29,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Kaniko executor — kept for backward compat with workflows that call `kaniko` directly.
 # Sourced from the Chainguard community fork (original archived by Google 2025-06-03).
-# Version pinned so Dependabot can track updates and builds are reproducible.
-COPY --from=ghcr.io/kaniko-build/dist/chainguard-forks-kaniko/executor:v1.25.14 /kaniko/executor /usr/local/bin/kaniko
+# Tag + digest pinned so a re-pushed tag cannot substitute a different binary.
+COPY --from=ghcr.io/kaniko-build/dist/chainguard-forks-kaniko/executor:v1.25.14@sha256:f77cd662e4bd55c052c5db1e030b532d324be92143ee274e58dadec30472b2ee /kaniko/executor /usr/local/bin/kaniko
 
 # Buildah + fuse-overlayfs — primary daemonless image builder.
 # fuse-overlayfs provides copy-on-write layer storage over FUSE (no kernel overlay mount,
@@ -40,49 +41,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       uidmap \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /etc/containers \
-    && printf '[storage]\n  driver = "overlay"\n  graphRoot = "/kaniko"\n\n[storage.options]\n\n  [storage.options.overlay]\n    mount_program = "/usr/bin/fuse-overlayfs"\n' \
+    && printf '[storage]\n  driver = "overlay"\n  graphroot = "/kaniko"\n  runroot = "/tmp/buildah-run"\n\n[storage.options]\n\n  [storage.options.overlay]\n    mount_program = "/usr/bin/fuse-overlayfs"\n' \
        > /etc/containers/storage.conf \
     && echo "root:0:4294967295" > /etc/subuid \
     && echo "root:0:4294967295" > /etc/subgid
 
-# Vault CLI — baked into the image because releases.hashicorp.com is geo-blocked
-# from the server hosting this runner. Install during image build (on GitHub hosted
-# runners) so validate.yml can use vault directly without network download at job time.
-# Direct binary download avoids the HashiCorp APT CDN (prone to mirror-sync failures).
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends unzip \
-    && rm -rf /var/lib/apt/lists/* \
-    && curl -fsSL \
-      "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip" \
-      -o /tmp/vault.zip \
-    && echo "${VAULT_SHA256}  /tmp/vault.zip" | sha256sum -c - \
-    && unzip -j /tmp/vault.zip vault -d /usr/local/bin/ \
-    && chmod +x /usr/local/bin/vault \
-    && rm /tmp/vault.zip
-
-# Cosign — baked in because the self-hosted server's SSL connection to
-# github.com/releases times out during job execution; image builds run on
-# GitHub-hosted runners where the connection succeeds. Same pattern as Vault.
-# Version pinned; bump here when bumping cosign-release in vault's ci.yml.
-RUN cd /tmp \
-    && curl -fsSL \
-      "https://github.com/sigstore/cosign/releases/download/v2.2.4/cosign-linux-amd64" \
-      -o cosign-linux-amd64 \
-    && curl -fsSL \
-      "https://github.com/sigstore/cosign/releases/download/v2.2.4/cosign_checksums.txt" \
-    | grep ' cosign-linux-amd64$' \
-    | sha256sum -c - \
-    && install -m 0755 cosign-linux-amd64 /usr/local/bin/cosign \
-    && rm cosign-linux-amd64
+# Vault and Cosign CLIs are present for existing workflows. Copy from official,
+# version- and digest-pinned images; no runtime download is needed on the server.
+COPY --from=hashicorp/vault:2.1.2@sha256:c2f666266f383d2cf424d86b8bb8ce7d065562173ffec2b476d762943608bb55 /bin/vault /usr/local/bin/vault
+COPY --from=ghcr.io/sigstore/cosign/cosign:v3.1.3@sha256:9e5c2f2edc34351160407ca3416c61855bdf9403c3c5936e0f0be7fc261611b8 /ko-app/cosign /usr/local/bin/cosign
 
 WORKDIR /opt/actions-runner
 
-# Download, verify SHA256, and extract GitHub Actions runner binary
+# Download, verify SHA256, and extract GitHub Actions runner binary.
+# Node20 executes JavaScript actions, but its bundled npm is unused here and
+# still carries vulnerable node-tar 6.2.1. Remove npm without removing Node20.
 RUN curl -fsSL \
       "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz" \
       -o runner.tar.gz \
     && echo "${RUNNER_SHA256}  runner.tar.gz" | sha256sum -c - \
     && tar -xzf runner.tar.gz \
+    && rm -rf externals/node20/lib/node_modules/npm \
     && rm runner.tar.gz
 
 # Install runner .NET dependencies

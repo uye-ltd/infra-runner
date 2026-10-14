@@ -1,3 +1,10 @@
+# Bounded container logs for every service (json-file keeps `docker compose logs` working).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
 
   # ---------------------------------------------------------------------------
@@ -18,12 +25,18 @@ services:
     environment:
       CONTAINERS: 1   # spawn, inspect, list, remove runner containers
       NETWORKS:   1   # create and remove per-job bridge networks
-      IMAGES:     1   # docker pull runner image
-      AUTH:       1   # docker login ghcr.io (POST /auth) for GHCR credentials
+      IMAGES:     1   # inspect the runner image before spawning
       POST:       1   # allow write operations
       DELETE:     1   # allow delete operations
       INFO:       1   # docker info (used by compose internals)
-      # All others (EXEC, BUILD, PLUGINS, SYSTEM, SWARM, SECRETS) default to 0
+      # All others (AUTH, EXEC, BUILD, PLUGINS, SYSTEM, SWARM, SECRETS) default to 0.
+      # AUTH is not needed: credentials are written to config.json and sent per request.
+    # NOTE: the proxy filters API *paths*, not request bodies — with CONTAINERS+POST the
+    # client can still create a privileged container. Treat controller/deployer as
+    # host-root-equivalent; the proxy narrows the surface, it is not a sandbox.
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
     deploy:
       resources:
         limits:
@@ -42,11 +55,13 @@ services:
       NETWORKS:   1   # docker compose manages compose networks
       IMAGES:     1   # docker pull for digest checks
       VOLUMES:    1   # docker compose inspects volumes
-      AUTH:       1   # docker login ghcr.io (POST /auth) for GHCR credentials
       POST:       1
       DELETE:     1
       INFO:       1
-      # EXEC, BUILD, PLUGINS, SYSTEM, SWARM, SECRETS default to 0
+      # AUTH, EXEC, BUILD, PLUGINS, SYSTEM, SWARM, SECRETS default to 0
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
     deploy:
       resources:
         limits:
@@ -60,45 +75,66 @@ services:
   # ---------------------------------------------------------------------------
 
   controller:
-    image: ghcr.io/${GITHUB_ORG}/infra-runner-controller:latest
+    # :verified is a LOCAL tag set by the deployer only after cosign verification
+    # (bootstrap: scripts/bootstrap-images.sh). It never exists in the registry, so
+    # compose must not try to pull it.
+    image: ghcr.io/${GITHUB_ORG}/infra-runner-controller:verified
+    pull_policy: never
     build:
       context: .
       dockerfile: controller/Dockerfile
     restart: unless-stopped
     depends_on:
       - controller-proxy
-    env_file: .env
+    # Explicit allowlist instead of `env_file: .env`: the controller must not receive
+    # secrets that only the deployer's plugin hooks need (e.g. VAULT_TOKEN). Values are
+    # interpolated from .env. Add new controller settings here.
     environment:
-      RUNNER_IMAGE: ghcr.io/${GITHUB_ORG}/infra-runner:latest
+      RUNNER_IMAGE: ghcr.io/${GITHUB_ORG}/infra-runner:verified
       DOCKER_HOST: tcp://controller-proxy:2375
-    # ── GitHub App auth (Ansible template reference) ─────────────────────────
-    # When using a GitHub App instead of a static PAT, add these to the
-    # environment block and mount the private key read-only.
-    # Remove GITHUB_TOKEN from .env when using this path.
-    #
-    #   environment:
-    #     GITHUB_APP_ID: "123456"
-    #     GITHUB_APP_INSTALLATION_ID: "78901234"
-    #     GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github_app_key
-    #   volumes:
-    #     - /path/on/host/github-app.pem:/run/secrets/github_app_key:ro
-    #
-    # Required GitHub App permissions:
-    #   Organization → Self-hosted runners: Read & write
-    #   Organization → Members: Read (required alongside runners)
-    # Note: App installation tokens cannot access GHCR. Runner images must be public.
-    # ─────────────────────────────────────────────────────────────────────────
-    tmpfs:
-      - /root/.docker   # docker login writes here; ephemeral, never touches overlay fs
+      GITHUB_ORG: ${GITHUB_ORG}
+      # Auth: GitHub App (preferred; App permissions: Self-hosted runners R/W, Members R)
+      # or classic PAT in GITHUB_TOKEN. Images must be public on the App path.
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
+      GITHUB_APP_PRIVATE_KEY_PATH: ${GITHUB_APP_PRIVATE_KEY_PATH:-}
+      RUNNER_LABELS: ${RUNNER_LABELS:-}
+      DESIRED_IDLE: ${DESIRED_IDLE:-}
+      MAX_RUNNERS: ${MAX_RUNNERS:-}
+      RUNNER_MEMORY: ${RUNNER_MEMORY:-}
+      RUNNER_CPUS: ${RUNNER_CPUS:-}
+      RUNNER_PIDS_LIMIT: ${RUNNER_PIDS_LIMIT:-}
+      RUNNER_KANIKO_SIZE: ${RUNNER_KANIKO_SIZE:-}
+      # `-` (not `:-`): explicitly empty in .env disables AppArmor; unset → default profile
+      RUNNER_APPARMOR_PROFILE: ${RUNNER_APPARMOR_PROFILE-infra-runner}
+      RUNNER_SECCOMP_HOST_PATH: ${RUNNER_SECCOMP_HOST_PATH:-}
+      RUNNER_SUBNET_PREFIX: ${RUNNER_SUBNET_PREFIX:-}
+      RUNNER_REGISTRATION_MODE: ${RUNNER_REGISTRATION_MODE:-}
+      RUNNER_GROUP_ID: ${RUNNER_GROUP_ID:-}
+      CONTROLLER_POLL_INTERVAL: ${CONTROLLER_POLL_INTERVAL:-}
+      SHUTDOWN_CLEANUP: ${SHUTDOWN_CLEANUP:-}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
     volumes:
-      - ${COMPOSE_PROJECT_DIR}/seccomp/runner-profile.json:/home/ghrunner/infra-runner/seccomp/runner-profile.json:ro
-      - /home/ghrunner/.ssh/github-app.pem:/run/secrets/github_app_key:ro
+      - ${COMPOSE_PROJECT_DIR:?COMPOSE_PROJECT_DIR must be set in .env}/seccomp/runner-profile.json:/home/ghrunner/infra-runner/seccomp/runner-profile.json:ro
+      # Host path of the GitHub App key. On the PAT path Docker creates an empty directory
+      # here if the file is missing; it is never read.
+      - ${GITHUB_APP_PRIVATE_KEY_HOST_PATH:-/home/ghrunner/.ssh/github-app.pem}:/run/secrets/github_app_key:ro
+    # Shutdown removes idle runners and deregisters them from GitHub (SHUTDOWN_CLEANUP);
+    # give it time before Docker escalates to SIGKILL.
+    stop_grace_period: 60s
+    # Liveness of the reconcile loop: the controller touches /tmp/heartbeat after every
+    # successful cycle. Stale for >5 min = loop wedged or Docker/GitHub unreachable.
     healthcheck:
-      test: ["CMD", "docker", "ps", "--filter", "label=runner-managed=true", "-q"]
+      test: ["CMD-SHELL", "test $$(( $$(date +%s) - $$(cat /tmp/heartbeat 2>/dev/null || echo 0) )) -lt 300"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      start_period: 60s
     networks:
       - controller-proxy-net
       - controller-net
@@ -108,7 +144,8 @@ services:
   # ---------------------------------------------------------------------------
 
   deployer:
-    image: ghcr.io/${GITHUB_ORG}/uye-deployer:latest
+    image: ghcr.io/${GITHUB_ORG}/uye-deployer:verified   # local tag, see controller
+    pull_policy: never
     build:
       context: .
       dockerfile: deployer/Dockerfile
@@ -120,28 +157,43 @@ services:
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-infra-runner}
       HEALTH_PORT: ${HEALTH_PORT:-8080}
       DOCKER_HOST: tcp://deployer-proxy:2375
+      HOOK_STATE_DIR: /var/lib/infra-runner-deployer
+      HOOK_STATE_REQUIRED: "true"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
     ports:
-      - "${HEALTH_PORT:-8080}:${HEALTH_PORT:-8080}"
+      # HEALTH_BIND=127.0.0.1 keeps /health off public interfaces (Docker-published ports
+      # bypass host firewalls such as ufw). Default 0.0.0.0 for external uptime monitors.
+      - "${HEALTH_BIND:-0.0.0.0}:${HEALTH_PORT:-8080}:${HEALTH_PORT:-8080}"
     tmpfs:
       - /root/.docker   # docker login writes here; ephemeral, never touches overlay fs
     volumes:
-      - ${COMPOSE_PROJECT_DIR}:/workspace:ro   # deployer reads compose file + .env to apply updates
-      - /home/ghrunner/.ssh/github-app.pem:/run/secrets/github_app_key:ro
+      - ${COMPOSE_PROJECT_DIR:?COMPOSE_PROJECT_DIR must be set in .env}:/workspace:ro   # deployer reads compose file + .env to apply updates
+      - deployer-state:/var/lib/infra-runner-deployer   # pending on_update hooks survive deployer restarts
+    # No GitHub App key here: the deployer needs no GitHub credential on the App path
+    # (images are public); on the PAT path it uses GITHUB_TOKEN from .env.
     healthcheck:
+      # 503 also when the loop is wedged (stale). Docker only marks the container
+      # unhealthy — it does not restart it; alert on it via /health.
       test: ["CMD", "curl", "-sf", "http://localhost:${HEALTH_PORT:-8080}/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      start_period: 120s
     networks:
       - deployer-proxy-net
       - deployer-net
 
-# No persistent volumes. All per-job volumes are managed by the controller.
+volumes:
+  deployer-state:   # only hook retry markers; runner jobs still use tmpfs only
 
 networks:
   # Service↔proxy pairs share a /26 network. No service can reach another
-  # service's proxy. Job networks live in 10.89.0.0/16 (see setup-egress-policy.sh).
+  # service's proxy. Job networks get explicit /24s from RUNNER_SUBNET_PREFIX.0.0/16
+  # (default 10.89.0.0/16), the range restricted by scripts/setup-egress-policy.sh.
   controller-proxy-net:
     ipam:
       config:

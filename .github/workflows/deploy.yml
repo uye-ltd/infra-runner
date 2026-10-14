@@ -1,99 +1,185 @@
 name: Build & Publish Images
 
-# Triggered on every push to main.
-# Images are pushed to GHCR; the on-server deployer polls for new digests
-# and applies updates automatically — no SSH or push-based deploy here.
+# Pull requests: build (and scan) only, with a read-only token.
+# Push to main: run local checks, build and push :<sha>, sign and scan every digest,
+# then promote :latest.
+# The on-server deployer verifies the signature and applies the update — no SSH here.
+#
+# Also enable "Require approval for all outside collaborators" in
+# Settings → Actions → General so stranger PRs do not run at all.
 on:
   push:
     branches: [main]
-
-  # Prevent fork PRs from running this workflow.
-  # NOTE: also enable "Require approval for all outside collaborators" in
-  # Settings → Actions → General to stop stranger PRs from queuing at all.
   pull_request:
     branches: [main]
 
+# Publishes are serialised: two quick pushes must not race, or an older build could
+# finish last and move :latest backwards (both would carry valid signatures and the
+# deployer would roll back). PR builds of the same branch cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && 'publish' || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
 env:
-  REGISTRY: ghcr.io
-  RUNNER_IMAGE:     ghcr.io/${{ github.repository_owner }}/infra-runner
-  CONTROLLER_IMAGE: ghcr.io/${{ github.repository_owner }}/infra-runner-controller
-  DEPLOYER_IMAGE:   ghcr.io/${{ github.repository_owner }}/uye-deployer
+  TRIVY_IMAGE: aquasec/trivy:0.63.0@sha256:6fb0646988fcd2fdf7bf123f7174945ebc2c9c72d1fa1567c8d7daeeb70f8037
 
 jobs:
-  build:
-    # Only push images on merges to main, not on PR builds from forks.
-    # Fork PRs get no secrets and cannot push to GHCR.
+  verify:
+    if: github.event_name == 'push'
+    name: verify before publication
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
-      id-token: write  # required for keyless cosign signing via OIDC
-
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Lint and test
+        run: bash scripts/verify.sh all
+
+  build:
+    if: github.event_name == 'pull_request'
+    name: build (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: runner,     file: Dockerfile,            image: infra-runner }
+          - { name: controller, file: controller/Dockerfile, image: infra-runner-controller }
+          - { name: deployer,   file: deployer/Dockerfile,   image: uye-deployer }
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          push: false
+          load: true
+          tags: ci/${{ matrix.image }}:${{ github.sha }}
+
+      - name: Report fixable HIGH vulnerabilities
+        env:
+          IMAGE: ci/${{ matrix.image }}:${{ github.sha }}
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${PWD}:/repo:ro" "${TRIVY_IMAGE}" \
+            image --no-progress --ignore-unfixed --severity HIGH \
+            --ignorefile /repo/.trivyignore.yaml --exit-code 0 "${IMAGE}"
+
+      - name: Block fixable CRITICAL vulnerabilities
+        env:
+          IMAGE: ci/${{ matrix.image }}:${{ github.sha }}
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${PWD}:/repo:ro" "${TRIVY_IMAGE}" \
+            image --no-progress --ignore-unfixed --severity CRITICAL \
+            --ignorefile /repo/.trivyignore.yaml --exit-code 1 "${IMAGE}"
+
+  publish:
+    if: github.event_name == 'push'
+    needs: verify
+    name: publish (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # push to GHCR
+      id-token: write   # keyless cosign signing via OIDC
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: runner,     file: Dockerfile,            image: infra-runner }
+          - { name: controller, file: controller/Dockerfile, image: infra-runner-controller }
+          - { name: deployer,   file: deployer/Dockerfile,   image: uye-deployer }
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Install cosign
-        if: github.event_name == 'push'
         uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003  # v4.1.1
         with:
           cosign-release: 'v2.2.4'
 
       - name: Log in to GHCR
-        # Skip login on fork PRs — they have no secret access
-        if: github.event_name == 'push'
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push runner image
-        id: build-runner
+      - name: Build and push immutable image
+        id: build
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
         with:
           context: .
-          push: ${{ github.event_name == 'push' }}
-          tags: |
-            ${{ env.RUNNER_IMAGE }}:latest
-            ${{ env.RUNNER_IMAGE }}:${{ github.sha }}
+          file: ${{ matrix.file }}
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ github.sha }}
 
-      - name: Build and push controller image
-        id: build-controller
-        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
-        with:
-          context: .
-          file: controller/Dockerfile
-          push: ${{ github.event_name == 'push' }}
-          tags: |
-            ${{ env.CONTROLLER_IMAGE }}:latest
-            ${{ env.CONTROLLER_IMAGE }}:${{ github.sha }}
+      # Sign by digest (immutable), not by tag. Keyless: the signature is bound to this
+      # workflow's OIDC identity (deploy.yml@refs/heads/main), which the deployer requires.
+      # Registry auth comes from the login step above — no password on the command line.
+      - name: Sign image
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
 
-      - name: Build and push deployer image
-        id: build-deployer
-        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
-        with:
-          context: .
-          file: deployer/Dockerfile
-          push: ${{ github.event_name == 'push' }}
-          tags: |
-            ${{ env.DEPLOYER_IMAGE }}:latest
-            ${{ env.DEPLOYER_IMAGE }}:${{ github.sha }}
-
-      # Sign each image by digest (immutable) not tag (mutable).
-      # Keyless signing: the signature is tied to this workflow's OIDC identity
-      # so only CI running on main can produce a valid signature.
-      - name: Sign images
-        if: github.event_name == 'push'
+      - name: Report fixable HIGH vulnerabilities
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}
         run: |
-          cosign sign --yes \
-            --registry-username "${{ github.actor }}" \
-            --registry-password "${{ secrets.GITHUB_TOKEN }}" \
-            ${{ env.RUNNER_IMAGE }}@${{ steps.build-runner.outputs.digest }}
-          cosign sign --yes \
-            --registry-username "${{ github.actor }}" \
-            --registry-password "${{ secrets.GITHUB_TOKEN }}" \
-            ${{ env.CONTROLLER_IMAGE }}@${{ steps.build-controller.outputs.digest }}
-          cosign sign --yes \
-            --registry-username "${{ github.actor }}" \
-            --registry-password "${{ secrets.GITHUB_TOKEN }}" \
-            ${{ env.DEPLOYER_IMAGE }}@${{ steps.build-deployer.outputs.digest }}
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${PWD}:/repo:ro" -v "${HOME}/.docker:/root/.docker:ro" "${TRIVY_IMAGE}" \
+            image --no-progress --ignore-unfixed --severity HIGH \
+            --ignorefile /repo/.trivyignore.yaml --exit-code 0 "${IMAGE}"
+
+      - name: Block fixable CRITICAL vulnerabilities
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${PWD}:/repo:ro" -v "${HOME}/.docker:/root/.docker:ro" "${TRIVY_IMAGE}" \
+            image --no-progress --ignore-unfixed --severity CRITICAL \
+            --ignorefile /repo/.trivyignore.yaml --exit-code 1 "${IMAGE}"
+
+  promote:
+    if: github.event_name == 'push'
+    needs: publish
+    name: promote verified images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003  # v4.1.1
+        with:
+          cosign-release: 'v2.2.4'
+
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A single-source promotion must preserve the signed digest. Buildx otherwise
+      # wraps a single manifest in a new index, which would not carry our signature.
+      - name: Verify candidates and promote signed digests
+        run: bash scripts/promote-images.sh

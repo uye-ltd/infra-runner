@@ -2,39 +2,56 @@
 """
 Minimal health endpoint for the infra-runner deployer.
 
-GET /health  →  200 {"status":"ok",...}   or  503 {"status":"unhealthy",...}
+GET /health  →  200 {"status":"ok",...}
+                503 {"status":"starting"|"unhealthy"|"stale"|"unknown",...}
 
-The deployer shell script writes /tmp/health (a JSON file) to record the
-current health state. This server reads that file on every request so the
-response always reflects the latest state without restarting the server.
+The deployer writes HEALTH_FILE (JSON with "status" and "epoch") at the end of every
+cycle and whenever a deploy step fails. This server reads it on every request. If the
+file has not been written for HEALTH_MAX_AGE seconds, the loop is considered wedged and
+the response is 503 "stale" even if the last recorded status was "ok".
 """
 
 import http.server
 import json
 import os
+import time
 
 HEALTH_FILE = os.environ.get("HEALTH_FILE", "/tmp/health")
 HOST = os.environ.get("HEALTH_HOST", "0.0.0.0")
 PORT = int(os.environ.get("HEALTH_PORT", "8080"))
+MAX_AGE = int(os.environ.get("HEALTH_MAX_AGE", "900"))
+
+
+def read_state(now=None):
+    """Return (http_code, body) for the current health file."""
+    now = time.time() if now is None else now
+    try:
+        with open(HEALTH_FILE) as f:
+            state = json.load(f)
+    except FileNotFoundError:
+        return 503, {"status": "starting"}
+    except (OSError, ValueError):
+        return 503, {"status": "unknown"}
+
+    epoch = state.get("epoch")
+    if isinstance(epoch, (int, float)) and now - epoch > MAX_AGE:
+        stale = dict(state)
+        stale["status"] = "stale"
+        stale["last_status"] = state.get("status")
+        stale["age_s"] = int(now - epoch)
+        return 503, stale
+
+    return (200 if state.get("status") == "ok" else 503), state
 
 
 class HealthHandler(http.server.BaseHTTPRequestHandler):
+    timeout = 5  # per-connection socket timeout: a slow client cannot hold a thread forever
+
     def do_GET(self):
         if self.path != "/health":
             self._send(404, {"status": "not_found"})
             return
-
-        try:
-            with open(HEALTH_FILE) as f:
-                state = json.load(f)
-        except FileNotFoundError:
-            # Deployer is still starting up
-            state = {"status": "starting"}
-        except Exception:
-            state = {"status": "unknown"}
-
-        code = 200 if state.get("status") == "ok" else 503
-        self._send(code, state)
+        self._send(*read_state())
 
     def _send(self, code, body):
         data = json.dumps(body).encode()
@@ -49,9 +66,11 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = http.server.HTTPServer((HOST, PORT), HealthHandler)
+    server = http.server.ThreadingHTTPServer((HOST, PORT), HealthHandler)
+    server.daemon_threads = True
     print(
-        f'{{"ts":null,"level":"info","svc":"deployer","msg":"Health server listening","port":{PORT}}}',
+        json.dumps({"level": "info", "svc": "deployer", "msg": "Health server listening",
+                    "port": PORT, "max_age_s": MAX_AGE}),
         flush=True,
     )
     server.serve_forever()

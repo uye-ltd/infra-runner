@@ -1,0 +1,14 @@
+#!/bin/bash
+set -euo pipefail
+printf 'docker %s\n' "$*" >> "${CALLS}"
+metadata=""
+previous=""
+for arg in "$@"; do
+  if [[ "${previous}" == --metadata-file ]]; then metadata="${arg}"; break; fi
+  previous="${arg}"
+done
+[[ -n "${metadata}" ]] || exit 1
+source_ref="${*: -1}"
+digest="${source_ref##*@}"
+[[ -f "${ST}/metadata_mismatch" ]] && digest=sha256:0000000000000000000000000000000000000000000000000000000000000000
+jq -nc --arg digest "${digest}" '{"containerimage.descriptor":{digest:$digest}}' > "${metadata}"

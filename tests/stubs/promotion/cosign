@@ -1,0 +1,14 @@
+#!/bin/bash
+set -euo pipefail
+ref="${*: -1}"
+name="${ref##*/}"
+name="${name%%:*}"
+printf 'cosign %s\n' "${ref}" >> "${CALLS}"
+[[ -f "${ST}/fail_${name}" ]] && exit 1
+char=a
+[[ "${name}" == infra-runner-controller ]] && char=b
+[[ "${name}" == uye-deployer ]] && char=c
+printf -v hex '%064d' 0
+digest="sha256:${hex//0/${char}}"
+[[ -f "${ST}/invalid_${name}" ]] && digest=invalid
+jq -nc --arg digest "${digest}" '[{critical:{image:{"docker-manifest-digest":$digest}}}]'
