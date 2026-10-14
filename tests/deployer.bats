@@ -33,6 +33,18 @@ cycle()   { if run_cycle > /dev/null 2>&1; then :; fi; }
 hstatus() { jq -r .status "${HEALTH_FILE}"; }
 hreason() { jq -r .reason "${HEALTH_FILE}"; }
 
+@test "invalid deployer intervals and health port fail at startup" {
+  local entry="${BATS_TEST_DIRNAME}/../deployer/entrypoint.sh" value
+  for value in POLL_INTERVAL=0 POLL_INTERVAL=abc POLL_INTERVAL=08 \
+               POLL_INTERVAL=3601 SELF_UPDATE_TIMEOUT=0 PLUGIN_HOOK_TIMEOUT=0 \
+               PRUNE_INTERVAL=0 PRUNE_INTERVAL=86401 HEALTH_MAX_AGE=oops \
+               HEALTH_PORT=65536; do
+    run env "${value}" bash -c 'source "$1"' _ "${entry}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *'must be a decimal integer between'* ]]
+  done
+}
+
 # deployer already on the verified d1, runner signed
 baseline() {
   sig uye-deployer sha256:d1; have uye-deployer sha256:d1; verified uye-deployer id-sha256:d1
@@ -279,6 +291,34 @@ PLUGIN_POST_DEPLOY_2_RUN=always
 PLUGIN_POST_DEPLOY_2_BLOCKING=false
 EOF
   echo 'sleep 30' > "${BATS_TEST_TMPDIR}/pw/hang.sh"
+  start=$(date +%s)
+  cycle
+  (( $(date +%s) - start < 10 ))
+}
+
+@test "invalid per-hook timeouts are rejected even for a non-blocking hook" {
+  plugin_fixture
+  echo 'PLUGIN_POST_DEPLOY_1_BLOCKING=false' >> "${PLUGINS_DIR}/v.plugin"
+  local value
+  for value in 0 3601 bogus; do
+    echo "PLUGIN_POST_DEPLOY_1_TIMEOUT=${value}" >> "${PLUGINS_DIR}/v.plugin"
+    cycle
+    [ "$(hstatus)" = unhealthy ]
+    hreason | grep -q "Invalid timeout for plugin vault-unseal hook 1: ${value}"
+    [ ! -f "${BATS_TEST_TMPDIR}/hook_env" ]
+  done
+}
+
+@test "TERM-resistant plugin hook is force-killed within its timeout grace" {
+  plugin_fixture
+  cat >> "${PLUGINS_DIR}/v.plugin" <<'EOF'
+PLUGIN_POST_DEPLOY_1_TIMEOUT=1
+PLUGIN_POST_DEPLOY_1_BLOCKING=false
+EOF
+  cat > "${BATS_TEST_TMPDIR}/pw/env.sh" <<'EOF'
+trap '' TERM
+while :; do sleep 1; done
+EOF
   start=$(date +%s)
   cycle
   (( $(date +%s) - start < 10 ))

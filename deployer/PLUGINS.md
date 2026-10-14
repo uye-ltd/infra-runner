@@ -28,7 +28,7 @@ PLUGIN_HOOK_ENV="MY_API_TOKEN MY_SERVICE_URL"
 # PLUGIN_POST_DEPLOY_N_SCRIPT    path relative to PLUGIN_COMPOSE_DIR
 # PLUGIN_POST_DEPLOY_N_RUN       always | on_update  (default: on_update)
 # PLUGIN_POST_DEPLOY_N_BLOCKING  true | false       (default: true)
-# PLUGIN_POST_DEPLOY_N_TIMEOUT   seconds            (default: PLUGIN_HOOK_TIMEOUT, 300)
+# PLUGIN_POST_DEPLOY_N_TIMEOUT   seconds, 1–3600    (default: PLUGIN_HOOK_TIMEOUT, 300)
 #
 # run: always    → script runs every poll cycle regardless of whether a new image was deployed
 # run: on_update → script runs after the service was recreated on a new verified image, and
@@ -81,7 +81,7 @@ reports 503 if it is still not on the verified image.
 
 ## Hook script environment
 
-Hooks run as `timeout <N> env -i <allowlist> bash <script>`:
+Hooks run as `timeout --kill-after=5s <N> env -i <allowlist> bash <script>`:
 
 - always passed: `PATH`, `HOME`, `DOCKER_HOST` (hooks can use the Docker API through the
   deployer's socket proxy), `PLUGIN_NAME`, `PLUGIN_COMPOSE_DIR`;

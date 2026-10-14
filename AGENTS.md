@@ -135,14 +135,14 @@ If `GITHUB_TOKEN` is set it is used as-is and the `GITHUB_APP_*` vars are ignore
 | `GITHUB_APP_PRIVATE_KEY_HOST_PATH` | no | `/home/ghrunner/.ssh/github-app.pem` | Host path of the App key, mounted into the controller |
 | `HEALTH_BIND` | no | `0.0.0.0` | Host address `HEALTH_PORT` is published on (`127.0.0.1` = local only) |
 | `COMPOSE_PROJECT_NAME` | yes | `infra-runner` | Compose project name; the deployer uses it for compose calls, container lookup (labels) and the helper's network name. Keep it stable |
-| `POLL_INTERVAL` | no | `60` | Deployer digest check interval (seconds) |
-| `HEALTH_PORT` | no | `8080` | Deployer health endpoint port |
+| `POLL_INTERVAL` | no | `60` | Deployer digest check interval (5–3600 seconds) |
+| `HEALTH_PORT` | no | `8080` | Deployer health endpoint port (1–65535) |
 | `CONTROLLER_POLL_INTERVAL` | no | `15` | Controller pool maintenance cycle interval (seconds) |
-| `SELF_UPDATE_TIMEOUT` | no | `120` | Max seconds to wait for the deployer self-update helper |
-| `PLUGIN_HOOK_TIMEOUT` | no | `300` | Default timeout (s) for plugin post-deploy hooks |
+| `SELF_UPDATE_TIMEOUT` | no | `120` | Max seconds to wait for the deployer self-update helper (3–3600) |
+| `PLUGIN_HOOK_TIMEOUT` | no | `300` | Default timeout (s) for plugin post-deploy hooks (1–3600) |
 | `PLUGIN_HOOK_ENV` | no | — | Space/comma-separated env var names passed to all plugin hooks (in addition to the descriptor's own `PLUGIN_HOOK_ENV`) |
-| `HEALTH_MAX_AGE` | no | `3×POLL_INTERVAL + SELF_UPDATE_TIMEOUT + PLUGIN_HOOK_TIMEOUT` | `/health` returns 503 `stale` when no cycle finished within this many seconds |
-| `PRUNE_INTERVAL` | no | `3600` | Min seconds between dangling-image prunes |
+| `HEALTH_MAX_AGE` | no | `3×POLL_INTERVAL + SELF_UPDATE_TIMEOUT + PLUGIN_HOOK_TIMEOUT` | `/health` returns 503 `stale` when no cycle finished within this many seconds (1–86400) |
+| `PRUNE_INTERVAL` | no | `3600` | Min seconds between dangling-image prunes (60–86400) |
 
 **Plugin system** (all optional; each plugin activates via its own Compose overlay):
 
@@ -386,7 +386,9 @@ them silently disables a plugin (or the deployer's own self/controller updates).
   (`PLUGIN_HOOK_ENV` in the descriptor and/or `.env`); without an allowlist they get the full
   environment **minus** `GITHUB_TOKEN`/`GITHUB_APP_*` (legacy, warns once). These credentials
   are also denied in explicit allowlists. Each hook has a
-  timeout (`PLUGIN_POST_DEPLOY_N_TIMEOUT`, default `PLUGIN_HOOK_TIMEOUT=300`).
+  timeout (`PLUGIN_POST_DEPLOY_N_TIMEOUT`, default `PLUGIN_HOOK_TIMEOUT=300`, 1–3600 s).
+  Invalid hook timeouts mark health unhealthy, even for non-blocking hooks. A hook that
+  ignores SIGTERM is killed 5 s after its timeout.
 - **on_update hook retries are in memory.** An `on_update` hook runs only after the plugin service is
   observed running on the verified image. An inspection failure keeps the hook pending for
   the next cycle. A failing blocking hook is retried every cycle; if the deployer restarts

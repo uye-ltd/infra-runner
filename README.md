@@ -200,13 +200,14 @@ Copy `.env.example` to `.env`. Exactly one auth path must be configured:
 | `GITHUB_APP_PRIVATE_KEY_HOST_PATH` | no | `/home/ghrunner/.ssh/github-app.pem` | Host path of the App key, mounted into the controller |
 | `HEALTH_BIND` | no | `0.0.0.0` | Host address the health port is published on; `127.0.0.1` keeps it off public interfaces (published ports bypass ufw) |
 | `COMPOSE_PROJECT_NAME` | yes | `infra-runner` | Compose project name used by the deployer for every compose call and to find its containers; keep it stable |
-| `POLL_INTERVAL` | no | `60` | Seconds between GHCR digest checks |
-| `HEALTH_PORT` | no | `8080` | Port for the deployer health endpoint |
+| `POLL_INTERVAL` | no | `60` | Seconds between GHCR digest checks (5–3600) |
+| `HEALTH_PORT` | no | `8080` | Port for the deployer health endpoint (1–65535) |
 | `CONTROLLER_POLL_INTERVAL` | no | `15` | Seconds between controller pool maintenance cycles (1–240; heartbeat expires after 300s) |
-| `SELF_UPDATE_TIMEOUT` | no | `120` | Max seconds to wait for the deployer self-update helper |
-| `PLUGIN_HOOK_TIMEOUT` | no | `300` | Default timeout for plugin post-deploy hooks |
+| `SELF_UPDATE_TIMEOUT` | no | `120` | Max seconds to wait for the deployer self-update helper (3–3600) |
+| `PLUGIN_HOOK_TIMEOUT` | no | `300` | Default timeout for plugin post-deploy hooks (1–3600) |
 | `PLUGIN_HOOK_ENV` | no | — | Env var names passed to all plugin hooks (see `deployer/PLUGINS.md`) |
-| `HEALTH_MAX_AGE` | no | derived | Seconds without a finished cycle before `/health` reports `stale` |
+| `HEALTH_MAX_AGE` | no | derived | Seconds without a finished cycle before `/health` reports `stale` (1–86400) |
+| `PRUNE_INTERVAL` | no | `3600` | Minimum seconds between dangling-image prunes (60–86400) |
 
 **Plugin system** (all optional — each plugin activates via its own Compose overlay):
 

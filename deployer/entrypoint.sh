@@ -40,13 +40,22 @@ POLL_INTERVAL="${POLL_INTERVAL:-60}"
 SELF_UPDATE_TIMEOUT="${SELF_UPDATE_TIMEOUT:-120}"
 PLUGIN_HOOK_TIMEOUT="${PLUGIN_HOOK_TIMEOUT:-300}"
 PRUNE_INTERVAL="${PRUNE_INTERVAL:-3600}"
-for _v in POLL_INTERVAL SELF_UPDATE_TIMEOUT PLUGIN_HOOK_TIMEOUT PRUNE_INTERVAL; do
-  [[ "${!_v}" =~ ^[0-9]+$ ]] || die "${_v} must be a non-negative integer"
-done
 HEALTH_FILE="${HEALTH_FILE:-/tmp/health}"
 HEALTH_PORT="${HEALTH_PORT:-8080}"
+
+validate_range() {
+  local name="$1" min="$2" max="$3" value="${!1}"
+  [[ "${value}" =~ ^[1-9][0-9]{0,5}$ ]] && (( value >= min && value <= max )) \
+    || die "${name} must be a decimal integer between ${min} and ${max}"
+}
+validate_range POLL_INTERVAL 5 3600
+validate_range SELF_UPDATE_TIMEOUT 3 3600
+validate_range PLUGIN_HOOK_TIMEOUT 1 3600
+validate_range PRUNE_INTERVAL 60 86400
 # /health turns 503 "stale" when the loop has not written a result for this long.
 HEALTH_MAX_AGE="${HEALTH_MAX_AGE:-$(( 3 * POLL_INTERVAL + SELF_UPDATE_TIMEOUT + PLUGIN_HOOK_TIMEOUT ))}"
+validate_range HEALTH_MAX_AGE 1 86400
+validate_range HEALTH_PORT 1 65535
 export HEALTH_FILE HEALTH_PORT HEALTH_MAX_AGE
 PLUGINS_DIR="${PLUGINS_DIR:-/plugins/}"
 SCRIPTS_DIR="${SCRIPTS_DIR:-/scripts}"
@@ -470,7 +479,7 @@ build_hook_env() {
   done < <(compgen -e)
 }
 
-# run_plugin_hooks UPDATED → 1 if a blocking hook failed
+# run_plugin_hooks UPDATED → 1 if a blocking hook failed or a hook timeout is invalid
 run_plugin_hooks() {
   local updated="$1" i rc=0 script run blocking tmo abs status
   for (( i = 0; ; i++ )); do
@@ -479,15 +488,19 @@ run_plugin_hooks() {
     run="${P[PLUGIN_POST_DEPLOY_${i}_RUN]:-on_update}"
     blocking="${P[PLUGIN_POST_DEPLOY_${i}_BLOCKING]:-true}"
     tmo="${P[PLUGIN_POST_DEPLOY_${i}_TIMEOUT]:-${PLUGIN_HOOK_TIMEOUT}}"
-    [[ "${tmo}" =~ ^[0-9]+$ ]] || tmo="${PLUGIN_HOOK_TIMEOUT}"
     if [[ "${run}" != always && ! ( "${run}" == on_update && "${updated}" == true ) ]]; then
+      continue
+    fi
+    if [[ ! "${tmo}" =~ ^[1-9][0-9]{0,3}$ ]] || (( tmo > 3600 )); then
+      set_unhealthy "Invalid timeout for plugin ${P[PLUGIN_NAME]} hook ${i}: ${tmo}"
+      rc=1
       continue
     fi
     abs="${P[PLUGIN_COMPOSE_DIR]}/${script}"
     build_hook_env
     log info "Running post-deploy hook" plugin "${P[PLUGIN_NAME]}" script "${abs}" run "${run}"
     status=0
-    timeout "${tmo}" env -i "${_hook_env[@]}" bash "${abs}" || status=$?
+    timeout --kill-after=5s "${tmo}" env -i "${_hook_env[@]}" bash "${abs}" || status=$?
     if (( status == 0 )); then
       log info "Post-deploy hook succeeded" script "${abs}"
       continue
