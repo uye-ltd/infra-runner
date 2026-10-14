@@ -33,7 +33,15 @@ lint() {
     hadolint Dockerfile controller/Dockerfile deployer/Dockerfile tests/Dockerfile
   docker run --rm -v "${REPO_ROOT}:/repo:ro" -w /repo "${ACTIONLINT_IMAGE}" -color
   docker run --rm -v "${REPO_ROOT}:/repo:ro" "${ZIZMOR_IMAGE}" --offline /repo/.github/workflows
-  docker compose --env-file .env.example config --no-env-resolution --quiet
+  # Compose checks that a service's env_file exists even with --no-env-resolution.
+  # CI has no .env; provide the public template only for this validation call.
+  (
+    if [[ ! -e .env && ! -L .env ]]; then
+      ln -s .env.example .env
+      trap 'rm -f .env' EXIT
+    fi
+    docker compose --env-file .env.example config --no-env-resolution --quiet
+  )
 }
 
 case "${1:-all}" in
