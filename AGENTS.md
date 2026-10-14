@@ -681,7 +681,9 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
   `scripts/setup-egress-policy.sh` installs chain `INFRA-RUNNER-FWD` (from `DOCKER-USER`):
   only DNS (53) and HTTPS (443) to the internet; RFC 1918, link-local/metadata and CGNAT
   ranges dropped; and `INFRA-RUNNER-IN` (from `INPUT`): runners cannot reach the host's own
-  services (sshd, published ports), except DNS. IPv6 is not covered (Docker's default).
+  services (sshd, published ports), except DNS. The script requires Docker's iptables
+  backend and checks that `DOCKER-USER` is the first unconditional `FORWARD` rule before
+  changing rules. The controller explicitly disables IPv6 on job networks.
 - **Image signatures.** CI signs all three images (runner, controller, deployer) with cosign
   keyless signing tied to the workflow's GitHub Actions OIDC identity. The deployer
   cosign-verifies the remote tag, pulls **the exact digest cosign verified**, and only then tags

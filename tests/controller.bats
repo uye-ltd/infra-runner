@@ -128,6 +128,7 @@ calls()      { cat "${CALLS}"; }
   [ "${rc}" -eq 0 ]
   [ "$(grep -c 'network create' "${CALLS}")" -eq 3 ]
   [ "$(grep -o 'subnet 10\.89\.[0-9]*\.0/24' "${CALLS}" | sort -u | wc -l)" -eq 3 ]
+  [ "$(grep -c 'network create --driver bridge --ipv6=false' "${CALLS}")" -eq 3 ]
 }
 
 @test "runner containers get bounded json-file logs" {

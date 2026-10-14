@@ -59,8 +59,8 @@ the controls above reduce, but do not remove, these risks:
 4. **`$GITHUB_WORKSPACE` disk is unbounded** (container writable layer): a job can fill the host
    disk. `/tmp`, `/root` and `/kaniko` are size-limited tmpfs.
 5. **Egress is restricted, not inspected.** HTTPS to any internet host is allowed, so a job can
-   exfiltrate whatever it can read. IPv6 is not covered by the iptables rules (Docker's default
-   is IPv4-only).
+   exfiltrate whatever it can read. IPv6 is not covered by the iptables rules; the controller
+   explicitly disables IPv6 on job networks.
 6. **Runner scope.** Org-level runners serve every repository the runner group allows, and any
    workflow with `runs-on: self-hosted` matches the default labels. Create a dedicated runner
    group (**Org settings → Actions → Runner groups**) limited to the intended repositories, set
@@ -107,6 +107,11 @@ DNS + HTTPS to the internet only; private, link-local and CGNAT ranges dropped) 
 except a host-local DNS resolver). Other rules on the host are left untouched. If an older
 version of the script set Docker's `default-address-pools` to the runner range, it prints
 migration steps — that pool placed every other compose network under the runner rules.
+The script requires Docker's iptables firewall backend and checks that `DOCKER-USER` is the
+first unconditional rule in `FORWARD` before changing any rules. It fails if that hook is
+missing or bypassable; Docker's native nftables backend does not provide it. Run the script
+after Docker starts and investigate a preflight failure before starting the controller.
+The controller explicitly creates runner networks with IPv6 disabled.
 
 The AppArmor script installs `apparmor/infra-runner` and loads it. The controller passes
 `--security-opt apparmor=infra-runner` to every runner container.

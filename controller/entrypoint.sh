@@ -298,7 +298,7 @@ create_runner_network() {
   local base=$(( 16#${job_id:0:2} ))
   for (( attempt = 0; attempt < 16; attempt++ )); do
     octet=$(( (base + attempt * 17) % 256 ))
-    if err=$(docker network create --driver bridge \
+    if err=$(docker network create --driver bridge --ipv6=false \
                --subnet "${RUNNER_SUBNET_PREFIX}.${octet}.0/24" \
                --label runner-managed=true --label "runner-job-id=${job_id}" \
                "${net_name}" 2>&1 > /dev/null); then

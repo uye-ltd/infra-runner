@@ -32,6 +32,23 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
+# Docker's iptables backend installs this unconditional jump before its own FORWARD
+# rules. A manually created DOCKER-USER chain, or one reached after an ACCEPT rule,
+# would make the policy appear installed while leaving runner traffic unrestricted.
+if ! iptables -L DOCKER-USER -n > /dev/null 2>&1; then
+  echo "ERROR: Docker's DOCKER-USER chain is missing. This policy requires Docker's iptables firewall backend; check Docker firewall-backend and start Docker first." >&2
+  exit 1
+fi
+if ! iptables -C FORWARD -j DOCKER-USER > /dev/null 2>&1; then
+  echo "ERROR: FORWARD does not jump to DOCKER-USER. Check Docker's iptables firewall backend before installing the policy." >&2
+  exit 1
+fi
+first_forward_rule=$(iptables -S FORWARD | awk '$1 == "-A" && !seen { print; seen = 1 }')
+if [[ "${first_forward_rule}" != '-A FORWARD -j DOCKER-USER' ]]; then
+  echo "ERROR: DOCKER-USER must be the first unconditional FORWARD rule; an earlier rule can bypass runner egress restrictions." >&2
+  exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # 0. Migration from earlier versions of this script
 # ---------------------------------------------------------------------------
@@ -78,7 +95,6 @@ fi
 # ---------------------------------------------------------------------------
 echo "Configuring ${FWD_CHAIN} for ${RUNNER_SUBNET}..."
 
-iptables -L DOCKER-USER -n > /dev/null 2>&1 || iptables -N DOCKER-USER
 iptables -N "${FWD_CHAIN}" 2>/dev/null || true
 iptables -F "${FWD_CHAIN}"
 
@@ -93,7 +109,12 @@ iptables -A "${FWD_CHAIN}" -s "${RUNNER_SUBNET}" -p tcp --dport 53  -j RETURN
 iptables -A "${FWD_CHAIN}" -s "${RUNNER_SUBNET}" -p tcp --dport 443 -j RETURN
 iptables -A "${FWD_CHAIN}" -s "${RUNNER_SUBNET}" -j DROP
 
-iptables -C DOCKER-USER -j "${FWD_CHAIN}" 2>/dev/null || iptables -I DOCKER-USER 1 -j "${FWD_CHAIN}"
+# Put our jump ahead of any host rules that might ACCEPT runner traffic. If an
+# older jump is lower in the chain, the new first jump makes it unreachable.
+first_user_rule=$(iptables -S DOCKER-USER | awk '$1 == "-A" && !seen { print; seen = 1 }')
+if [[ "${first_user_rule}" != "-A DOCKER-USER -j ${FWD_CHAIN}" ]]; then
+  iptables -I DOCKER-USER 1 -j "${FWD_CHAIN}"
+fi
 
 # ---------------------------------------------------------------------------
 # 2. INPUT: runner → the host itself
@@ -109,7 +130,10 @@ iptables -A "${IN_CHAIN}" -s "${RUNNER_SUBNET}" -p udp --dport 53 -j RETURN
 iptables -A "${IN_CHAIN}" -s "${RUNNER_SUBNET}" -p tcp --dport 53 -j RETURN
 iptables -A "${IN_CHAIN}" -s "${RUNNER_SUBNET}" -j DROP
 
-iptables -C INPUT -j "${IN_CHAIN}" 2>/dev/null || iptables -I INPUT 1 -j "${IN_CHAIN}"
+first_input_rule=$(iptables -S INPUT | awk '$1 == "-A" && !seen { print; seen = 1 }')
+if [[ "${first_input_rule}" != "-A INPUT -j ${IN_CHAIN}" ]]; then
+  iptables -I INPUT 1 -j "${IN_CHAIN}"
+fi
 
 echo "  Rules applied."
 
@@ -131,5 +155,5 @@ Done. Runner networks (${RUNNER_SUBNET}) may only reach:
   - DNS   : UDP/TCP 53 (internet, or a resolver on the host)
   - HTTPS : TCP 443 (internet)
 Blocked: ${BLOCKED_RANGES[*]}, the host itself, all other ports/protocols.
-IPv6 is not covered — keep Docker's IPv6 disabled for runner networks (the default).
+IPv6 is not covered — the controller explicitly disables it for runner networks.
 EOF

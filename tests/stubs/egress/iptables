@@ -1,0 +1,35 @@
+#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${CALLS}"
+
+case "${1:-} ${2:-}" in
+  '-L DOCKER-USER') [[ "${EGRESS_NO_DOCKER_USER:-0}" != 1 ]] ;;
+  '-C FORWARD') [[ "${EGRESS_NO_FORWARD_JUMP:-0}" != 1 ]] ;;
+  '-S FORWARD')
+    echo '-P FORWARD DROP'
+    if [[ "${EGRESS_FORWARD_ACCEPT_FIRST:-0}" == 1 ]]; then
+      echo '-A FORWARD -j ACCEPT'
+    fi
+    echo '-A FORWARD -j DOCKER-USER'
+    ;;
+  '-S DOCKER-USER')
+    echo '-N DOCKER-USER'
+    if [[ -f "${ST}/user_first" ]]; then
+      cat "${ST}/user_first"
+    else
+      echo '-A DOCKER-USER -j ACCEPT'
+    fi
+    ;;
+  '-S INPUT')
+    echo '-P INPUT ACCEPT'
+    if [[ -f "${ST}/input_first" ]]; then
+      cat "${ST}/input_first"
+    else
+      echo '-A INPUT -j ACCEPT'
+    fi
+    ;;
+  '-I DOCKER-USER') echo '-A DOCKER-USER -j INFRA-RUNNER-FWD' > "${ST}/user_first" ;;
+  '-I INPUT') echo '-A INPUT -j INFRA-RUNNER-IN' > "${ST}/input_first" ;;
+  '-D DOCKER-USER') exit 1 ;;
+  *) : ;;
+esac
