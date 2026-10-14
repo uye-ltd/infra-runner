@@ -12,6 +12,10 @@ case "$1" in
   network)
     if [[ "$2" == ls ]]; then cat "${ST}/nets" 2>/dev/null; exit 0; fi
     [[ "$2" == rm && -f "${ST}/network_rm_fail" ]] && exit 1
+    [[ "$2" == create && -f "${ST}/network_create_fail" ]] && {
+      echo 'Error response from daemon: network already exists' >&2
+      exit 1
+    }
     if [[ "$2" == create && -f "${ST}/overlaps" ]]; then
       n=$(cat "${ST}/overlaps")
       if (( n > 0 )); then

@@ -120,8 +120,8 @@ If `GITHUB_TOKEN` is set it is used as-is and the `GITHUB_APP_*` vars are ignore
 | `GITHUB_ORG` | yes | — | GitHub org slug (e.g. `acme`) |
 | `GITHUB_REPO` | no | `infra-runner` | Repo name; used to construct cosign certificate identity |
 | `RUNNER_LABELS` | no | `self-hosted,linux,x64` | Comma-separated runner labels |
-| `DESIRED_IDLE` | no | `2` | Idle runners to keep ready (busy runners are not counted; idle/busy comes from the GitHub API) |
-| `MAX_RUNNERS` | no | `DESIRED_IDLE` | Hard cap on runner containers, idle + busy. Raise above `DESIRED_IDLE` to keep runners warm while jobs execute |
+| `DESIRED_IDLE` | no | `2` | Idle runners to keep ready (busy runners are not counted; idle/busy comes from the GitHub API). 0–256 and at most `MAX_RUNNERS` |
+| `MAX_RUNNERS` | no | `DESIRED_IDLE` | Hard cap on runner containers, idle + busy. Raise above `DESIRED_IDLE` to keep runners warm while jobs execute. 0–256 because the runner `/16` has 256 `/24` networks |
 | `RUNNER_PIDS_LIMIT` | no | `4096` | `--pids-limit` per runner container (fork-bomb guard) |
 | `RUNNER_REGISTRATION_MODE` | no | `jit` | `jit` (single-use JIT config) or `token` (legacy registration token, reusable for 1 h) |
 | `RUNNER_GROUP_ID` | no | `1` | Runner group for JIT registration (`1` = Default) |
@@ -471,7 +471,7 @@ See `deployer/PLUGINS.md` for the descriptor format and a worked example.
 
 **No named volumes** — runners use tmpfs only. Per-job networks are created by the controller
 with an explicit `--subnet` `<RUNNER_SUBNET_PREFIX>.<n>.0/24` (third octet derived from the job
-id, moved on overlap), so only runner networks fall into the egress-restricted range.
+id, moved on overlap through all 256 `/24` candidates), so only runner networks fall into the egress-restricted range.
 
 **Plugin overlays** — external projects ship their own `docker-compose.infra-runner.yml` that
 extends the deployer service with the mounts their plugin needs (the `*.plugin` descriptor file

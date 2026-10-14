@@ -244,6 +244,25 @@ calls()      { cat "${CALLS}"; }
   [ "$(grep -c 'network create --driver bridge --ipv6=false' "${CALLS}")" -eq 3 ]
 }
 
+@test "network allocation searches beyond 16 occupied subnets" {
+  gh_runners ''
+  echo 16 > "${ST}/overlaps"
+  DESIRED_IDLE=1; MAX_RUNNERS=1
+  reconcile_rc
+  [ "${rc}" -eq 0 ]
+  [ "$(grep -c 'network create' "${CALLS}")" -eq 17 ]
+  [ "$(grep -o 'subnet 10\.89\.[0-9]*\.0/24' "${CALLS}" | sort -u | wc -l)" -eq 17 ]
+}
+
+@test "network creation errors other than overlap do not exhaust the subnet pool" {
+  gh_runners ''
+  touch "${ST}/network_create_fail"
+  DESIRED_IDLE=1; MAX_RUNNERS=1
+  reconcile_rc
+  [ "${rc}" -eq 1 ]
+  [ "$(grep -c 'network create' "${CALLS}")" -eq 1 ]
+}
+
 @test "runner containers get bounded json-file logs" {
   gh_runners ''
   reconcile_rc
@@ -281,5 +300,9 @@ calls()      { cat "${CALLS}"; }
   run env RUNNER_SUBNET_PREFIX=10.999 bash -c 'source "$1"' _ "${entry}"
   [ "${status}" -ne 0 ]
   run env DESIRED_IDLE=08 bash -c 'source "$1"' _ "${entry}"
+  [ "${status}" -ne 0 ]
+  run env MAX_RUNNERS=257 bash -c 'source "$1"' _ "${entry}"
+  [ "${status}" -ne 0 ]
+  run env DESIRED_IDLE=3 MAX_RUNNERS=2 bash -c 'source "$1"' _ "${entry}"
   [ "${status}" -ne 0 ]
 }

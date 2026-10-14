@@ -59,8 +59,10 @@ for _v in DESIRED_IDLE MAX_RUNNERS RUNNER_PIDS_LIMIT RUNNER_GROUP_ID CONTROLLER_
   [[ "${!_v}" =~ ^(0|[1-9][0-9]{0,12})$ ]] \
     || die "${_v} must be a non-negative decimal integer (got '${!_v}')"
 done
-(( DESIRED_IDLE <= 1000 )) || die "DESIRED_IDLE must be at most 1000"
-(( MAX_RUNNERS <= 1000 )) || die "MAX_RUNNERS must be at most 1000"
+# A /16 contains exactly 256 per-job /24 networks.
+(( DESIRED_IDLE <= 256 )) || die "DESIRED_IDLE must be at most 256 (available runner /24 networks)"
+(( MAX_RUNNERS <= 256 )) || die "MAX_RUNNERS must be at most 256 (available runner /24 networks)"
+(( DESIRED_IDLE <= MAX_RUNNERS )) || die "DESIRED_IDLE must not exceed MAX_RUNNERS"
 (( RUNNER_PIDS_LIMIT >= 1 && RUNNER_PIDS_LIMIT <= 1048576 )) \
   || die "RUNNER_PIDS_LIMIT must be between 1 and 1048576"
 (( RUNNER_GROUP_ID >= 1 )) || die "RUNNER_GROUP_ID must be positive"
@@ -317,7 +319,8 @@ remove_running_runners() {
 create_runner_network() {
   local net_name="$1" job_id="$2" attempt octet err
   local base=$(( 16#${job_id:0:2} ))
-  for (( attempt = 0; attempt < 16; attempt++ )); do
+  # 17 is coprime to 256, so this visits each /24 exactly once before giving up.
+  for (( attempt = 0; attempt < 256; attempt++ )); do
     octet=$(( (base + attempt * 17) % 256 ))
     if err=$(docker network create --driver bridge --ipv6=false \
                --subnet "${RUNNER_SUBNET_PREFIX}.${octet}.0/24" \
@@ -325,7 +328,9 @@ create_runner_network() {
                "${net_name}" 2>&1 > /dev/null); then
       return 0
     fi
-    grep -qiE 'overlap|in use|already' <<< "${err}" || break
+    # Other errors (including a duplicate network name) cannot be fixed by
+    # choosing another subnet and should fail without 255 redundant API calls.
+    grep -qi 'overlap' <<< "${err}" || break
   done
   log error "Failed to create runner network" job_id "${job_id}" detail "${err}"
   return 1

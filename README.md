@@ -185,8 +185,8 @@ Copy `.env.example` to `.env`. Exactly one auth path must be configured:
 | `GITHUB_ORG` | yes | — | GitHub org slug (e.g. `acme`) |
 | `GITHUB_REPO` | no | `infra-runner` | Repo name; used to construct the cosign certificate identity |
 | `RUNNER_LABELS` | no | `self-hosted,linux,x64` | Comma-separated runner labels |
-| `DESIRED_IDLE` | no | `2` | Idle runners to keep ready (busy runners not counted) |
-| `MAX_RUNNERS` | no | `DESIRED_IDLE` | Hard cap on runner containers, idle + busy |
+| `DESIRED_IDLE` | no | `2` | Idle runners to keep ready (busy runners not counted); 0–256, at most `MAX_RUNNERS` |
+| `MAX_RUNNERS` | no | `DESIRED_IDLE` | Hard cap on runner containers, idle + busy; 0–256 because the runner `/16` has 256 `/24` networks |
 | `RUNNER_PIDS_LIMIT` | no | `4096` | Max processes per runner container |
 | `RUNNER_REGISTRATION_MODE` | no | `jit` | `jit` (single-use) or `token` (legacy, reusable for 1 h) |
 | `RUNNER_GROUP_ID` | no | `1` | Runner group for JIT registration |
