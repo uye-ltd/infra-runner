@@ -324,7 +324,8 @@ Each cycle (run_cycle, every POLL_INTERVAL seconds; never exits the loop on erro
                  Success: compose stops us (SIGTERM → shutdown) and starts the replacement.
   2. controller: sync_image(infra-runner-controller:latest); differs →
                  docker compose -f /workspace/docker-compose.yml up -d --no-deps controller,
-                 then re-check (still different → 503 "check its image ref").
+                 then confirm a running container uses the verified image (missing, inspect
+                 failure or mismatch → 503).
   3. runner:     sync_image(infra-runner:latest) only — the controller spawns from :verified.
   4. plugins:    run_plugins() — see "Plugin system" below.
   5. No reasons recorded → write_health ok, then maybe_prune (dangling images older than
@@ -378,9 +379,10 @@ them silently disables a plugin (or the deployer's own self/controller updates).
   (`PLUGIN_HOOK_ENV` in the descriptor and/or `.env`); without an allowlist they get the full
   environment **minus** `GITHUB_TOKEN`/`GITHUB_APP_*` (legacy, warns once). Each hook has a
   timeout (`PLUGIN_POST_DEPLOY_N_TIMEOUT`, default `PLUGIN_HOOK_TIMEOUT=300`).
-- **on_update hook retries are in memory.** A failing blocking on_update hook is retried every
-  cycle; if the deployer restarts in between, the retry is forgotten (the service itself is
-  already on the verified image).
+- **on_update hook retries are in memory.** An `on_update` hook runs only after the plugin service is
+  observed running on the verified image. An inspection failure keeps the hook pending for
+  the next cycle. A failing blocking hook is retried every cycle; if the deployer restarts
+  in between, the retry is forgotten (the service itself is already on the verified image).
 - **`COMPOSE_FILE`'s relative entries resolve against the working directory, not
   `--project-directory`.** The deployer inherits `COMPOSE_FILE` from its `.env` (that's how a
   plugin overlay is activated), so every compose call must be shielded from it or run from the

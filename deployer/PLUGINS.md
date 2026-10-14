@@ -62,7 +62,10 @@ Every cycle, for each `*.plugin` file in `PLUGINS_DIR`:
    `PLUGIN_COMPOSE_SERVICE`) is not running that image:
    `docker compose --project-name PLUGIN_COMPOSE_PROJECT --project-directory PLUGIN_COMPOSE_DIR up -d --no-deps PLUGIN_COMPOSE_SERVICE`
    — retried every cycle until it succeeds (also after a deployer restart).
-4. Post-deploy hooks run per their `run` and `blocking` rules.
+4. Confirm the service is running on the verified image. An inspection failure keeps an
+   `on_update` hook pending for the next cycle.
+5. Post-deploy hooks run per their `run` and `blocking` rules. A pending `on_update` hook
+   is retried while the deployer stays up; a deployer restart loses that pending state.
 
 Verification, pull, compose and blocking-hook failures set `/health` to 503.
 A malformed descriptor (missing required fields, invalid `PLUGIN_NAME`) is skipped with a

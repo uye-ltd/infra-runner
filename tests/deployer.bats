@@ -98,7 +98,37 @@ baseline() {
   echo id-other > "${ST}/img_${R}infra-runner-controller_other"
   echo "ghcr.io/acme/infra-runner-controller:other" > "${ST}/svcref_controller"
   cycle
-  hreason | grep -q 'still not on the verified image'
+  hreason | grep -q 'still not running on the verified image'
+}
+
+@test "stopped controller is recreated even when its old image matches verified" {
+  baseline
+  sig infra-runner-controller sha256:c1; have infra-runner-controller sha256:c1
+  verified infra-runner-controller id-sha256:c1
+  running controller id-sha256:c1
+  touch "${ST}/stopped_controller"
+  cycle
+  grep -q 'compose .*up -d --no-deps controller' "${CALLS}"
+  [ ! -f "${ST}/stopped_controller" ]
+  [ "$(hstatus)" = ok ]
+}
+
+@test "controller inspect failure after compose up stays unhealthy" {
+  baseline
+  sig infra-runner-controller sha256:c2; running controller id-sha256:c1
+  touch "${ST}/inspect_fail_after_compose_controller"
+  cycle
+  [ "$(hstatus)" = unhealthy ]
+  hreason | grep -q 'Cannot inspect the controller container after compose up'
+}
+
+@test "controller compose success without a running container stays unhealthy" {
+  baseline
+  sig infra-runner-controller sha256:c2; running controller id-sha256:c1
+  touch "${ST}/compose_stopped_controller"
+  cycle
+  [ "$(hstatus)" = unhealthy ]
+  hreason | grep -q 'still not running on the verified image'
 }
 
 @test "self-update helper failing fast is detected quickly and the cycle continues" {
@@ -154,6 +184,39 @@ EOF
   [ ! -e "${BATS_TEST_TMPDIR}/pwned2" ]
   grep -q 'pull --quiet ghcr.io/acme/vault-unseal@sha256:v2' "${CALLS}"
   [ "$(cat "${ST}/ctr_vault-unseal")" = id-sha256:v2 ]
+}
+
+@test "plugin on_update hook waits for a verified running service after inspection fails" {
+  plugin_fixture
+  sed -i 's|^PLUGIN_POST_DEPLOY_0_SCRIPT=.*|PLUGIN_POST_DEPLOY_0_SCRIPT=update.sh|' "${PLUGINS_DIR}/v.plugin"
+  echo "touch ${BATS_TEST_TMPDIR}/update_hook_ran" > "${BATS_TEST_TMPDIR}/pw/update.sh"
+  touch "${ST}/inspect_fail_after_compose_vault-unseal"
+  cycle
+  [ "$(hstatus)" = unhealthy ]
+  hreason | grep -q 'cannot inspect service after compose up'
+  [ ! -e "${BATS_TEST_TMPDIR}/update_hook_ran" ]
+  rm "${ST}/inspect_fail_after_compose_vault-unseal"
+  cycle
+  [ "$(hstatus)" = ok ]
+  [ -e "${BATS_TEST_TMPDIR}/update_hook_ran" ]
+}
+
+@test "plugin compose success without a running service stays unhealthy" {
+  plugin_fixture
+  touch "${ST}/compose_stopped_vault-unseal"
+  cycle
+  [ "$(hstatus)" = unhealthy ]
+  hreason | grep -q 'still not running on the verified image'
+}
+
+@test "stopped plugin service is recreated even when its image matches verified" {
+  plugin_fixture
+  have vault-unseal sha256:v2; verified vault-unseal id-sha256:v2
+  running vault-unseal id-sha256:v2
+  touch "${ST}/stopped_vault-unseal"
+  cycle
+  grep -q 'compose .*up -d --no-deps vault-unseal' "${CALLS}"
+  [ ! -f "${ST}/stopped_vault-unseal" ]
 }
 
 @test "plugin hooks never receive GitHub credentials (legacy full-env mode)" {

@@ -205,11 +205,12 @@ sync_image() {
   [[ -n "${_desired_id}" ]]
 }
 
-# compose_container_image PROJECT SERVICE → _actual_id ("" if no container exists)
+# compose_container_image PROJECT SERVICE → _actual_id ("" if no running container exists)
 compose_container_image() {
   local ids
   _actual_id=""
-  ids=$(docker ps -a \
+  ids=$(docker ps \
+          --filter status=running \
           --filter "label=com.docker.compose.project=$1" \
           --filter "label=com.docker.compose.service=$2" \
           --format '{{.ID}}') || return 1
@@ -330,7 +331,7 @@ reconcile_deployer() {
     return 0
   fi
   if [[ -z "${_actual_id}" ]]; then
-    log warn "Deployer container not found via compose labels — self-update skipped"
+    set_unhealthy "Running deployer container not found via compose labels — self-update skipped"
     return 0
   fi
   [[ "${_actual_id}" != "${_desired_id}" ]] || return 0
@@ -353,8 +354,12 @@ reconcile_controller() {
     set_unhealthy "docker compose up -d controller failed"
     return 0
   fi
-  if compose_container_image "${COMPOSE_PROJECT_NAME}" controller && [[ "${_actual_id}" != "${_desired_id}" ]]; then
-    set_unhealthy "Controller still not on the verified image after compose up — check its image ref in docker-compose.yml"
+  if ! compose_container_image "${COMPOSE_PROJECT_NAME}" controller; then
+    set_unhealthy "Cannot inspect the controller container after compose up"
+    return 0
+  fi
+  if [[ "${_actual_id}" != "${_desired_id}" ]]; then
+    set_unhealthy "Controller still not running on the verified image after compose up — check its image ref in docker-compose.yml"
     return 0
   fi
   log info "Controller updated successfully"
@@ -507,7 +512,7 @@ process_plugin() {
     return 0
   fi
 
-  local name="${P[PLUGIN_NAME]}" applied=false
+  local name="${P[PLUGIN_NAME]}" service_verified=false
   log info "Checking plugin" plugin "${name}" image "${P[PLUGIN_IMAGE]}"
 
   if sync_image "${P[PLUGIN_IMAGE]}" "${P[PLUGIN_CERT_IDENTITY]}"; then
@@ -521,27 +526,33 @@ process_plugin() {
            --project-name "${P[PLUGIN_COMPOSE_PROJECT]}" \
            --project-directory "${P[PLUGIN_COMPOSE_DIR]}" \
            up -d --no-deps "${P[PLUGIN_COMPOSE_SERVICE]}"; then
-        applied=true
         _hooks_pending[${name}]=1
-        if compose_container_image "${P[PLUGIN_COMPOSE_PROJECT]}" "${P[PLUGIN_COMPOSE_SERVICE]}" \
-           && [[ "${_actual_id}" != "${_desired_id}" ]]; then
-          set_unhealthy "Plugin ${name}: service still not on the verified image — its compose image ref must be ${P[PLUGIN_IMAGE]} without pull_policy: always"
+        if ! compose_container_image "${P[PLUGIN_COMPOSE_PROJECT]}" "${P[PLUGIN_COMPOSE_SERVICE]}"; then
+          set_unhealthy "Plugin ${name}: cannot inspect service after compose up"
+        elif [[ "${_actual_id}" != "${_desired_id}" ]]; then
+          set_unhealthy "Plugin ${name}: service still not running on the verified image — its compose image ref must be ${P[PLUGIN_IMAGE]} without pull_policy: always"
         else
+          service_verified=true
           log info "Plugin service updated" plugin "${name}"
         fi
       else
         set_unhealthy "docker compose up failed for plugin ${name}"
       fi
+    else
+      service_verified=true
     fi
   fi
 
-  # on_update hooks run after an apply and are retried every cycle until they pass.
+  # Keep a pending hook across inspection failures, but run it only after the
+  # updated service is observed running on the verified image.
   local run_on_update=false
-  [[ -n "${_hooks_pending[${name}]:-}" ]] && run_on_update=true
+  if [[ -n "${_hooks_pending[${name}]:-}" && "${service_verified}" == true ]]; then
+    run_on_update=true
+  fi
   if run_plugin_hooks "${run_on_update}"; then
-    unset "_hooks_pending[${name}]"
-  elif [[ "${applied}" == true || "${run_on_update}" == true ]]; then
-    _hooks_pending[${name}]=1
+    if [[ "${run_on_update}" == true ]]; then
+      unset "_hooks_pending[${name}]"
+    fi
   fi
 }
 

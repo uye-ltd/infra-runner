@@ -345,8 +345,10 @@ Unverified images are never pulled: the deployer asks cosign which digest it ver
 pulls only that digest, and compose/controller run only the local `:verified` tag
 (`pull_policy: never`, `docker run --pull never`). A signature failure sets `GET /health` to
 `503` and leaves the running image in place. Because the deployer compares the running
-image with `:verified` every cycle, a failed `compose up`, self-update or blocking hook is
-retried every cycle — also after a deployer restart — and `503` holds until it succeeds.
+image with `:verified` every cycle, a failed `compose up` or self-update is retried every
+cycle, including after a deployer restart. The deployer confirms that the service is running
+on the verified image before reporting success. A failed blocking plugin hook is retried
+each cycle while the deployer stays up; its pending state is lost on deployer restart.
 
 **Upgrading a server from the tag-pull deployer:** no action is needed before `git pull` — the
 old deployer self-updates and the new one tags all images `:verified` on its first cycle. After

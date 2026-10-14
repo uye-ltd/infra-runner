@@ -20,17 +20,26 @@ case "$1" in
   tag) cp "${ST}/img_$(k "$2")" "${ST}/img_$(k "$3")" ;;
   ps)
     svc=$(printf '%s\n' "$@" | sed -n 's/^label=com.docker.compose.service=//p')
-    [[ -n "${svc}" && -f "${ST}/ctr_${svc}" ]] && echo "cid_${svc}"
+    [[ -n "${svc}" && -f "${ST}/ctr_${svc}" && ! -f "${ST}/stopped_${svc}" ]] && echo "cid_${svc}"
     exit 0 ;;
   inspect)
-    if [[ "$2" == cid_* ]]; then cat "${ST}/ctr_${2#cid_}"; exit 0; fi
+    if [[ "$2" == cid_* ]]; then
+      svc="${2#cid_}"
+      [[ -f "${ST}/inspect_fail_${svc}" ]] && exit 1
+      [[ -f "${ST}/inspect_fail_after_compose_${svc}" && -f "${ST}/compose_done_${svc}" ]] && exit 1
+      cat "${ST}/ctr_${svc}"
+      exit 0
+    fi
     [[ -f "${ST}/helper_state" ]] || exit 1
     cat "${ST}/helper_state" ;;
   compose)
     svc="${*: -1}"
     [[ -f "${ST}/compose_fail" ]] && exit 1
     ref=$(cat "${ST}/svcref_${svc}")
-    cp "${ST}/img_$(k "${ref}")" "${ST}/ctr_${svc}" ;;
+    cp "${ST}/img_$(k "${ref}")" "${ST}/ctr_${svc}"
+    rm -f "${ST}/stopped_${svc}"
+    [[ -f "${ST}/compose_stopped_${svc}" ]] && touch "${ST}/stopped_${svc}"
+    touch "${ST}/compose_done_${svc}" ;;
   run)
     [[ -f "${ST}/helper_exit" ]] && echo "exited $(cat "${ST}/helper_exit")" > "${ST}/helper_state"
     echo cid ;;
