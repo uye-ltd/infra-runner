@@ -40,7 +40,7 @@ no SSH push from CI is required.
 │   ├── setup-apparmor.sh             # one-time: install + load AppArmor profile
 │   └── setup-egress-policy.sh        # one-time, idempotent: iptables chains INFRA-RUNNER-FWD/-IN for the runner range
 ├── seccomp/
-│   └── runner-profile.json           # seccomp deny-list: blocks kernel-escape syscalls
+│   └── runner-profile.json           # seccomp: default-ALLOW + small deny-list (replaces Docker's default profile)
 ├── tests/
 │   ├── run.sh                        # runs the suite in a container (same locally and in CI)
 │   ├── Dockerfile                    # test env: ubuntu + bats + jq + python3
@@ -132,7 +132,7 @@ If `GITHUB_TOKEN` is set it is used as-is and the `GITHUB_APP_*` vars are ignore
 | `RUNNER_SUBNET_PREFIX` | no | `10.89` | Job networks get explicit /24s from `<prefix>.0.0/16`; keep in sync with `RUNNER_SUBNET` of `setup-egress-policy.sh` |
 | `GITHUB_APP_PRIVATE_KEY_HOST_PATH` | no | `/home/ghrunner/.ssh/github-app.pem` | Host path of the App key, mounted into the controller |
 | `HEALTH_BIND` | no | `0.0.0.0` | Host address `HEALTH_PORT` is published on (`127.0.0.1` = local only) |
-| `COMPOSE_PROJECT_NAME` | yes | `infra-runner` | Must match the server directory name |
+| `COMPOSE_PROJECT_NAME` | yes | `infra-runner` | Compose project name; the deployer uses it for compose calls, container lookup (labels) and the helper's network name. Keep it stable |
 | `POLL_INTERVAL` | no | `60` | Deployer digest check interval (seconds) |
 | `HEALTH_PORT` | no | `8080` | Deployer health endpoint port |
 | `CONTROLLER_POLL_INTERVAL` | no | `15` | Controller pool maintenance cycle interval (seconds) |
@@ -191,9 +191,10 @@ Docker's default seccomp profile.
   before extraction, then extracted to `/opt/actions-runner/`.
 - **User**: root — required by Buildah and Kaniko to extract image layers and execute `RUN`
   instructions. Container-level controls (seccomp, AppArmor, resource limits, no Docker socket,
-  ephemeral) are the security boundary. The controller grants explicit capabilities at spawn time
-  (`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`) so image layer extraction can unpack
-  files with restrictive ownership like `/etc/shadow` (root:shadow 640).
+  ephemeral) are the security boundary. The controller adds `CHOWN`, `DAC_OVERRIDE`, `FOWNER`,
+  `SETUID`, `SETGID` (layer extraction, e.g. `/etc/shadow` root:shadow 640) **and `SYS_PTRACE`,
+  `SYS_ADMIN`** (Buildah's user-namespace setup with the full-range `/etc/subuid` mapping) at
+  spawn time. See README → *Threat model* for what `SYS_ADMIN` implies.
 - **Entrypoint**: `entrypoint.sh`
 
 ---
@@ -201,14 +202,19 @@ Docker's default seccomp profile.
 ## entrypoint.sh walkthrough (runner image)
 
 ```
-1. Validate GITHUB_ORG and RUNNER_REGISTRATION_TOKEN are set.
-   GITHUB_TOKEN is NOT present — the controller never passes it to runners.
-2. ./config.sh --url … --token … --name … --labels … --unattended --ephemeral
-3. exec ./run.sh   ← PID 1; exits after exactly one job
+JIT mode (default):  RUNNER_JITCONFIG set
+  1. copy it to a local, `unset RUNNER_JITCONFIG`
+  2. exec ./run.sh --jitconfig <config>   ← already registered + ephemeral; no config.sh
+Token mode (RUNNER_REGISTRATION_MODE=token):
+  1. validate GITHUB_ORG + RUNNER_REGISTRATION_TOKEN, `unset RUNNER_REGISTRATION_TOKEN`
+  2. ./config.sh --url … --token … --name … --labels … --unattended --ephemeral
+  3. exec ./run.sh   ← PID 1; exits after exactly one job
 ```
 
-`--ephemeral` marks the runner as single-use. After `run.sh` picks up one job it
-deregisters automatically and exits. No signal trap needed.
+The secret is removed from the environment before `run.sh`, so job steps never inherit it.
+GITHUB_TOKEN is never present — the controller does not pass it to runners. The JIT config
+stays visible in `run.sh`'s argv, which is acceptable: it is single-use and consumed before any
+job step runs. Ephemeral runners deregister automatically after one job; no signal trap needed.
 
 ---
 
@@ -627,16 +633,14 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
 
 ## Security notes
 
-- **No privileged containers in the job path.** Buildah with fuse-overlayfs builds images
-  in userspace without `--privileged`. The DinD host-escape vector is eliminated entirely.
-  Runner containers receive a minimal explicit capability set (`CHOWN`, `DAC_OVERRIDE`,
-  `FOWNER`, `SETUID`, `SETGID`) required to unpack OCI image layers; all other capabilities
-  use Docker defaults, and dangerous ones (`SYS_ADMIN`, `SYS_MODULE`, `NET_RAW`, etc.) are
-  denied by the AppArmor profile. Ubuntu 24.04 enables `apparmor_restrict_unprivileged_userns=1`,
-  which blocks `clone(CLONE_NEWUSER)` for all processes (even root) unless the AppArmor profile
-  includes `userns,`. The `infra-runner` profile grants this specifically so Buildah can create
-  user-namespaced working containers (OCI bundle setup) and runc-based RUN isolation.
-  `SYS_ADMIN` remains denied — `userns,` is an orthogonal AppArmor permission token, not a capability.
+- **No `--privileged`, no Docker socket in the job path — but runners hold `CAP_SYS_ADMIN`.**
+  Buildah with fuse-overlayfs builds images without a daemon. Runner containers get Docker's
+  default capabilities plus `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID` (layer
+  extraction) and `SYS_PTRACE` + `SYS_ADMIN` (Buildah user-namespace setup: `proc_setgroups_open`
+  calls `ptrace_may_access`, and the full-range uid_map write needs `CAP_SYS_ADMIN` in the parent
+  namespace). The AppArmor profile **grants** both, grants `userns,` (Ubuntu 24.04's
+  `apparmor_restrict_unprivileged_userns=1` blocks `clone(CLONE_NEWUSER)` otherwise) and allows
+  `mount,` without restriction. This is the largest residual risk — see README → *Threat model*.
 - **The controller's GitHub credential never enters runner containers.** The controller
   holds either a GitHub App installation token (preferred, auto-refreshed every 55 min) or
   a static PAT. Runners receive only a single-use JIT config (default), which is unset from the environment
@@ -651,16 +655,18 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
   compromised controller/deployer as root on the host. Both run with `cap_drop: ALL` and
   `no-new-privileges`. The proxy containers themselves mount the raw socket (unavoidable);
   they are minimal, digest-pinned, and tracked by Dependabot.
-- **Seccomp** blocks kernel-level syscalls (`kexec_*`, `bpf`, kernel modules, `pivot_root`)
-  that are the basis of most container escape techniques. `mount`/`umount2` are intentionally
-  re-opened to support fuse-overlayfs; the AppArmor profile compensates by restricting
-  allowed mount types to `fstype=fuse.*` only.
+- **Seccomp** (`seccomp/runner-profile.json`) is a **default-ALLOW** profile that denies only
+  `kexec_*`, kernel-module syscalls, `bpf`, `perf_event_open`, `iopl`/`ioperm`, keyring syscalls
+  and `pivot_root`. It *replaces* Docker's default profile, so syscalls Docker would normally
+  block (`unshare`, `setns`, `mount`, `open_by_handle_at`, `userfaultfd`, …) are allowed.
+  `mount`/`umount2` are needed by fuse-overlayfs; AppArmor does **not** narrow mount types
+  (`mount,` is unrestricted because Buildah's flag combinations cannot be expressed per rule).
 - **AppArmor profile** (`apparmor/infra-runner`) is applied to every runner container via
-  `--security-opt apparmor=infra-runner`. It denies dangerous capabilities (`sys_module`,
-  `sys_admin`, `net_raw`), raw/packet sockets, writes to kernel tunables and sysfs, and
-  access to host credential files. It explicitly grants `userns,` so Buildah can create
-  user namespaces for OCI bundle setup — Ubuntu 24.04's kernel-level restriction requires
-  this token even for root processes; `sys_admin` is still denied. Reload after any profile
+  `--security-opt apparmor=infra-runner`. It denies `sys_module`, `sys_rawio`, `sys_boot`,
+  `sys_time`, `net_admin`, `net_raw`, `mac_*`, raw/packet sockets, writes to kernel tunables,
+  sysfs and cgroupfs, reads of `/etc/shadow`/`sudoers`, and cron/module paths. It **grants**
+  `sys_admin`, `sys_ptrace`, `userns,` and unrestricted `mount,` (Buildah). Path-based denials
+  are best-effort while `mount` is allowed (a path can be re-mounted elsewhere). Reload after any profile
   edit with `sudo apparmor_parser -r apparmor/infra-runner`. Load fresh with
   `scripts/setup-apparmor.sh` on first start. Set `RUNNER_APPARMOR_PROFILE=` (empty) in
   `.env` to disable.
@@ -693,5 +699,6 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
   `stale` (no cycle finished within `HEALTH_MAX_AGE`). Failed deploys are retried every cycle,
   so it stays 503 until the deploy succeeds. Poll with UptimeRobot, Grafana, etc.
 - **The `.env` file and any mounted PEM key contain secrets — both are gitignored. Never commit them.**
-- **Remaining open threats:** proxy containers have full socket access (mitigated by being
-  minimal and versioned); `$GITHUB_WORKSPACE` disk is unconstrained.
+- **Residual risks** are listed in README → *Threat model* (runner `SYS_ADMIN` + permissive
+  seccomp, host-root-equivalent controller/deployer, unsigned plugin hooks, unbounded
+  `$GITHUB_WORKSPACE` disk, IPv6, runner-group scope).

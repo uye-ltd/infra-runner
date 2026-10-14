@@ -125,7 +125,9 @@ services:
 In infra-runner's `.env`:
 
 ```bash
-COMPOSE_FILE=docker-compose.yml:../my-project/docker-compose.infra-runner.yml
+# List every base file explicitly — once COMPOSE_FILE is set, Compose no longer
+# auto-discovers docker-compose.override.yml (drop it if you have none).
+COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:../my-project/docker-compose.infra-runner.yml
 MY_PROJECT_DIR=/home/ghrunner/my-project
 MY_SERVICE_CERT_IDENTITY=https://github.com/org/my-service/.github/workflows/deploy.yml@refs/heads/main
 ```

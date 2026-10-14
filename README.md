@@ -30,15 +30,41 @@ Per job (created and destroyed by the controller):
 | Threat | Protection |
 |---|---|
 | Malicious job leaves persistent state | Container destroyed after every job (`--ephemeral`) |
-| Privileged container escape | No privileged flag — Buildah + fuse-overlayfs builds in userspace, no DinD |
+| Privileged container escape | No `--privileged`, no Docker socket, no DinD — Buildah + fuse-overlayfs. **Runners do hold `CAP_SYS_ADMIN`** (see *Threat model*) |
 | Credential theft | Controller credential (App token or PAT) stays in the controller; runners get only a single-use JIT config, unset before job steps run |
 | Docker socket abuse | Socket proxy allows only required API path groups (`EXEC`, `BUILD`, `AUTH` disabled). It does not inspect request bodies, so controller/deployer remain host-root-equivalent; both run with all capabilities dropped and `no-new-privileges` |
 | Supply chain / image tampering | cosign keyless signing in CI; deployer pulls only the digest cosign verified and the stack runs only the local `:verified` tag; runner binary SHA256-verified at build time; CI actions pinned to commit SHAs |
 | Resource abuse (mining, DoS) | `--memory` and `--cpus` limits on every runner container; socket proxies capped at 128 MB / 0.25 CPU |
 | Network exfiltration / lateral movement | Egress policy: DNS + HTTPS only; private, link-local and CGNAT ranges and the host itself blocked |
-| Kernel-level container escape | `seccomp/runner-profile.json` blocks `mount`, `kexec_*`, `bpf`, kernel module syscalls |
-| File system / capability abuse | AppArmor profile grants `sys_ptrace` and `sys_admin` (required for buildah user-namespace setup: `proc_setgroups_open` calls `ptrace_may_access`, and full-range uid_map writes require `CAP_SYS_ADMIN`); grants `userns` (Ubuntu 24.04 blocks `clone(CLONE_NEWUSER)` without this); denies `sys_module`, `net_raw`, sysfs writes, kernel tunables, and host credential reads |
-| Stranger PRs triggering jobs | GitHub setting: require approval for outside collaborators (see below) |
+| Kernel-level container escape | `seccomp/runner-profile.json` denies `kexec_*`, kernel-module syscalls, `bpf`, `perf_event_open`, keyring syscalls, `pivot_root`. It is default-ALLOW and replaces Docker's stricter default profile (`mount`, `unshare`, `setns` are allowed) |
+| File system / capability abuse | AppArmor profile grants `sys_ptrace`, `sys_admin`, `userns` and unrestricted `mount` (required for Buildah's user-namespace setup); denies `sys_module`, `net_raw`, `net_admin`, sysfs/cgroupfs writes, kernel tunables and host credential reads — path-based, so best-effort while `mount` is allowed |
+| Stranger PRs triggering jobs | GitHub setting: require approval for outside collaborators (see below); dedicated runner group limited to selected repositories |
+
+### Threat model — residual risks
+
+Read this before pointing public repositories at the runners. Jobs are **untrusted code**;
+the controls above reduce, but do not remove, these risks:
+
+1. **Runners hold `CAP_SYS_ADMIN` with a permissive seccomp profile.** Buildah's user-namespace
+   setup (full-range `/etc/subuid` mapping) needs it; AppArmor allows `mount` without restriction
+   and the custom seccomp profile allows syscalls Docker's default would block. A kernel bug
+   reachable through these interfaces is a host escape. Dropping `SYS_ADMIN` (narrow subuid
+   range + `BUILDAH_ISOLATION=chroot`) is planned but must be validated on the server first.
+2. **Controller and deployer are host-root-equivalent.** The socket proxy filters API paths, not
+   request bodies; whoever controls either container can start a privileged container. Both
+   run with all capabilities dropped and receive no job input.
+3. **Plugin hooks run unsigned code** from on-server git checkouts inside the deployer. Anyone who
+   can push to a plugin repository followed by a `git pull` cron can execute code there — protect
+   those branches (see `deployer/PLUGINS.md`).
+4. **`$GITHUB_WORKSPACE` disk is unbounded** (container writable layer): a job can fill the host
+   disk. `/tmp`, `/root` and `/kaniko` are size-limited tmpfs.
+5. **Egress is restricted, not inspected.** HTTPS to any internet host is allowed, so a job can
+   exfiltrate whatever it can read. IPv6 is not covered by the iptables rules (Docker's default
+   is IPv4-only).
+6. **Runner scope.** Org-level runners serve every repository the runner group allows, and any
+   workflow with `runs-on: self-hosted` matches the default labels. Create a dedicated runner
+   group (**Org settings → Actions → Runner groups**) limited to the intended repositories, set
+   `RUNNER_GROUP_ID`, and only then enable "Allow public repositories" for that group.
 
 ---
 
@@ -168,7 +194,7 @@ Copy `.env.example` to `.env`. Exactly one auth path must be configured:
 | `RUNNER_SUBNET_PREFIX` | no | `10.89` | Job networks get explicit /24s from `<prefix>.0.0/16`; keep in sync with `RUNNER_SUBNET` of `setup-egress-policy.sh` |
 | `GITHUB_APP_PRIVATE_KEY_HOST_PATH` | no | `/home/ghrunner/.ssh/github-app.pem` | Host path of the App key, mounted into the controller |
 | `HEALTH_BIND` | no | `0.0.0.0` | Host address the health port is published on; `127.0.0.1` keeps it off public interfaces (published ports bypass ufw) |
-| `COMPOSE_PROJECT_NAME` | yes | `infra-runner` | Must match the directory name on the server |
+| `COMPOSE_PROJECT_NAME` | yes | `infra-runner` | Compose project name used by the deployer for every compose call and to find its containers; keep it stable |
 | `POLL_INTERVAL` | no | `60` | Seconds between GHCR digest checks |
 | `HEALTH_PORT` | no | `8080` | Port for the deployer health endpoint |
 | `CONTROLLER_POLL_INTERVAL` | no | `15` | Seconds between controller pool maintenance cycles |
@@ -212,10 +238,13 @@ jobs:
       packages: write
       id-token: write   # required for cosign OIDC keyless signing
     steps:
-      - uses: actions/checkout@v4
+      # Pin third-party actions to full commit SHAs (Dependabot keeps them current).
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -235,7 +264,7 @@ jobs:
           echo "digest=$(cat /tmp/digest.txt)" >> "$GITHUB_OUTPUT"
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003  # v4.1.1
 
       - name: Sign image
         run: |
@@ -244,8 +273,8 @@ jobs:
 ```
 
 Notes:
-- `--isolation=chroot` is required: Ubuntu 24.04's AppArmor profile grants `userns` for working-container setup, but chroot is used for `RUN` instruction execution as defence-in-depth.
-- Runner containers are spawned with `--cap-add SYS_PTRACE --cap-add SYS_ADMIN` — both are required for buildah's user-namespace setup path (the kernel's `proc_setgroups_open` calls `ptrace_may_access` across namespace boundaries, and writing full-range uid_map entries requires `CAP_SYS_ADMIN`). The AppArmor profile explicitly grants these capabilities rather than denying them.
+- `--isolation=chroot` is required: the default OCI isolation would have Buildah start each `RUN` step through an OCI runtime with its own set of namespaces, which this container's capability/AppArmor set is not built for; chroot isolation runs `RUN` steps inside the job container itself.
+- Runner containers are spawned with `--cap-add SYS_PTRACE --cap-add SYS_ADMIN` — both are required for Buildah's user-namespace setup (the kernel's `proc_setgroups_open` calls `ptrace_may_access` across namespace boundaries, and writing full-range uid_map entries requires `CAP_SYS_ADMIN`). The AppArmor profile grants them. See *Threat model*.
 - Sign **by digest**, not by tag — tags are mutable; the deployer verifies by digest.
 - Buildah storage is preconfigured in the image (`/etc/containers/storage.conf`: overlay via fuse-overlayfs, `graphroot=/kaniko`, `runroot=/tmp/buildah-run`) — no setup step is needed. `/kaniko` is the controller-mounted tmpfs (`RUNNER_KANIKO_SIZE`, default `5g`); increase it if your image layers are large.
 
