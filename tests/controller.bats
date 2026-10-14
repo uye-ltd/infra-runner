@@ -158,6 +158,7 @@ PY
 }
 
 @test "exited runner is removed and deregistered (404 tolerated)" {
+  DESIRED_IDLE=0
   gh_runners ''
   touch "${ST}/no_image"
   echo 'zz|55|Exited (1) 3 seconds ago' > "${ST}/exited"

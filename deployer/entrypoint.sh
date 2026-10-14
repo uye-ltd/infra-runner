@@ -45,8 +45,9 @@ HEALTH_PORT="${HEALTH_PORT:-8080}"
 
 validate_range() {
   local name="$1" min="$2" max="$3" value="${!1}"
-  [[ "${value}" =~ ^[1-9][0-9]{0,5}$ ]] && (( value >= min && value <= max )) \
-    || die "${name} must be a decimal integer between ${min} and ${max}"
+  if [[ ! "${value}" =~ ^[1-9][0-9]{0,5}$ ]] || (( value < min || value > max )); then
+    die "${name} must be a decimal integer between ${min} and ${max}"
+  fi
 }
 validate_range POLL_INTERVAL 5 3600
 validate_range SELF_UPDATE_TIMEOUT 3 3600
@@ -559,9 +560,9 @@ clear_hook_pending() {
 # A new deployer image can start with an older Compose file during migration.
 # Refuse plugin updates until its state directory is backed by the named volume.
 hook_state_mounted() {
-  local mount_id parent device root mountpoint rest
+  local mountpoint
   [[ -r /proc/self/mountinfo ]] || return 1
-  while read -r mount_id parent device root mountpoint rest; do
+  while read -r _ _ _ _ mountpoint _; do
     [[ "${mountpoint}" == "${HOOK_STATE_DIR}" ]] && return 0
   done < /proc/self/mountinfo
   return 1
