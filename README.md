@@ -21,7 +21,7 @@ Per job (created and destroyed by the controller):
 
 **Controller** keeps `DESIRED_IDLE` runners idle (default 2), up to `MAX_RUNNERS` in total; busy/idle state comes from the GitHub API. A local runner counts as idle only when GitHub explicitly reports it idle and, for JIT runners, its registration ID matches; unknown registrations still count toward the total cap. When a runner finishes its job it exits; the controller tears down its per-job resources and spawns a replacement. A controller restart or update adopts running runners instead of killing them. If a crash leaves a job network without a container, the controller waits 120 seconds from network creation, removes any matching JIT registration in GitHub, then deletes the network. If the GitHub runner list is unavailable or malformed, the controller keeps existing jobs and marks its reconcile cycle unsuccessful; it does not spawn from incomplete busy data. It validates the JIT registration response and confirms a new container is running before counting a spawn as successful. Failed container/network cleanup or GitHub deregistration also fails the cycle and is retried; the controller heartbeat stays stale until a cycle succeeds.
 
-**Runner containers** have no Docker socket and no privileged flag. With `RUNNER_RUNTIME=kata`, each runs in a separate Kata VM with its own kernel; the Docker default and all Compose services remain on `runc`. Image builds use **Buildah** with **fuse-overlayfs** (daemonless, no `--privileged`). The `kaniko` binary is also present for backward compatibility. The controller's credential (GitHub App token or PAT) never enters runner containers — only a single-use JIT runner config is injected at spawn time, and it is removed from the environment before any job step runs.
+**Runner containers** have no Docker socket and no privileged flag. With `RUNNER_RUNTIME=kata`, each runs in a separate Kata VM with its own kernel; the Docker default and all Compose services remain on `runc`. On the server tested here, Docker's `127.0.0.11` resolver did not answer from a Kata guest on a per-job bridge, so the runner entrypoint sets a public resolver from `RUNNER_KATA_DNS` (default `1.1.1.1`) before registering. Image builds use **Buildah** with **fuse-overlayfs** (daemonless, no `--privileged`). The `kaniko` binary is also present for backward compatibility. The controller's credential (GitHub App token or PAT) never enters runner containers — only a single-use JIT runner config is injected at spawn time, and it is removed from the environment before any job step runs.
 
 ---
 
@@ -49,7 +49,7 @@ the controls above reduce, but do not remove, these risks:
    setup (full-range `/etc/subuid` mapping) needs it; AppArmor allows `mount` without restriction
    and the custom seccomp profile allows syscalls Docker's default would block. With the default
    `runc` runtime, a kernel bug reachable through these interfaces can escape to the host.
-   Kata places these capabilities in a guest kernel, but the QEMU/virtiofsd host processes
+   Kata places these capabilities in a guest kernel, but the Cloud Hypervisor/virtiofsd host processes
    and their device interfaces become the new host-facing attack surface. A VM escape remains
    possible, so do not treat Kata as complete protection for Vault and edge.
 2. **Controller and deployer are host-root-equivalent.** The socket proxy filters API paths, not
@@ -127,7 +127,7 @@ subject to the runner egress rules.
 
 ## Optional Kata runner isolation
 
-Kata 4.2.0 uses the Rust shim with QEMU for this deployment. It requires a Linux x86-64
+Kata 4.2.0 uses the Rust shim with Cloud Hypervisor for this deployment. It requires a Linux x86-64
 host with KVM, vhost-vsock, cgroup v2 and Docker Engine 26 or newer. Install it after
 checking that `/opt` has free space and that the runner egress chains are active:
 
@@ -150,7 +150,7 @@ Buildah workflow as the final acceptance test. Idle runners are replaced; busy
 ones finish on their original runtime. To roll back, set
 `RUNNER_RUNTIME=` and run the same Compose command. The tmpfs sizes are maximums, not
 RAM allocated at startup, but their contents count against the memory limit.
-Monitor controller logs, failed spawns, QEMU processes and disk use. The runner's
+Monitor controller logs, failed spawns, Cloud Hypervisor processes and disk use. The runner's
 writable layer, including `$GITHUB_WORKSPACE`, still resides on host storage and can
 fill it; Kata does not change the egress policy or the host-root-equivalent controller.
 
@@ -229,6 +229,7 @@ account that owns the PAT), and leave the App vars unset.
 | `SHUTDOWN_CLEANUP` | no | `idle` | On controller stop: `idle`, `all` or `none` |
 | `RUNNER_MEMORY` | no | `6g` | Memory limit per runner container; must leave 2 GiB beyond all three tmpfs size limits |
 | `RUNNER_RUNTIME` | no | empty | Docker runtime for runners only; `kata` opts in, empty uses Docker's default |
+| `RUNNER_KATA_DNS` | no | `1.1.1.1` | Public IPv4 resolver written inside Kata guests on isolated runner bridges |
 | `RUNNER_CPUS` | no | `2` | CPU limit per runner container |
 | `RUNNER_KANIKO_SIZE` | no | `2g` | tmpfs size for Buildah layers and Kaniko scratch space inside runner |
 | `RUNNER_APPARMOR_PROFILE` | no | `infra-runner` | AppArmor profile name; empty to disable |

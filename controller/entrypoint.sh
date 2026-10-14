@@ -29,6 +29,7 @@ RUNNER_CPUS="${RUNNER_CPUS:-2}"
 RUNNER_PIDS_LIMIT="${RUNNER_PIDS_LIMIT:-4096}"
 RUNNER_KANIKO_SIZE="${RUNNER_KANIKO_SIZE:-2g}"
 RUNNER_RUNTIME="${RUNNER_RUNTIME:-}"
+RUNNER_KATA_DNS="${RUNNER_KATA_DNS:-1.1.1.1}"
 # `-` not `:-`: unset → default profile, explicitly empty → AppArmor disabled (as documented).
 RUNNER_APPARMOR_PROFILE="${RUNNER_APPARMOR_PROFILE-infra-runner}"
 RUNNER_SECCOMP_HOST_PATH="${RUNNER_SECCOMP_HOST_PATH:-}"
@@ -71,6 +72,13 @@ done
   || die "CONTROLLER_POLL_INTERVAL must be between 1 and 240 (heartbeat expires after 300s)"
 [[ -z "${RUNNER_RUNTIME}" || "${RUNNER_RUNTIME}" =~ ^[a-z0-9][a-z0-9._-]*$ ]] \
   || die "RUNNER_RUNTIME must be empty or contain only lowercase letters, digits, dots, underscores and hyphens"
+if [[ "${RUNNER_RUNTIME}" == kata ]]; then
+  [[ "${RUNNER_KATA_DNS}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
+    || die "RUNNER_KATA_DNS must be an IPv4 address"
+  IFS=. read -r dns_a dns_b dns_c dns_d <<< "${RUNNER_KATA_DNS}"
+  (( 10#${dns_a} <= 255 && 10#${dns_b} <= 255 && 10#${dns_c} <= 255 && 10#${dns_d} <= 255 )) \
+    || die "RUNNER_KATA_DNS must be an IPv4 address"
+fi
 # tmpfs size= is a maximum, not preallocated RAM. Still, if all three mounts
 # fill, leave at least 2 GiB for the runner, build processes and guest services.
 size_bytes() {
@@ -457,6 +465,7 @@ spawn_runner() {
   [[ -n "${RUNNER_APPARMOR_PROFILE}" ]] && security_opts+=(--security-opt "apparmor=${RUNNER_APPARMOR_PROFILE}")
   local runtime_opts=()
   [[ -n "${RUNNER_RUNTIME}" ]] && runtime_opts+=(--runtime "${RUNNER_RUNTIME}")
+  [[ "${RUNNER_RUNTIME}" == kata ]] && runtime_opts+=(-e "RUNNER_KATA_DNS=${RUNNER_KATA_DNS}")
 
   # --pull never: only run an image the deployer has already pulled after verifying
   # its signature; never let `docker run` fetch an unverified :latest on its own.

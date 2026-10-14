@@ -421,12 +421,14 @@ PY
   reconcile_rc
   [ "${rc}" -eq 0 ]
   grep -q -- '^docker run -d --pull never --runtime kata ' "${CALLS}"
+  grep -q -- '-e RUNNER_KATA_DNS=1.1.1.1' "${CALLS}"
 
   : > "${CALLS}"
   RUNNER_RUNTIME=""
   reconcile_rc
   [ "${rc}" -eq 0 ]
   refute grep -q -- '--runtime' "${CALLS}"
+  refute grep -q -- 'RUNNER_KATA_DNS' "${CALLS}"
 }
 
 @test "explicitly empty RUNNER_APPARMOR_PROFILE disables AppArmor" {
@@ -472,6 +474,10 @@ PY
   run env RUNNER_RUNTIME='kata;touch /tmp/bad' bash -c 'source "$1"' _ "${entry}"
   [ "${status}" -ne 0 ]
   [[ "${output}" == *'RUNNER_RUNTIME must be'* ]]
+
+  run env RUNNER_RUNTIME=kata RUNNER_KATA_DNS=300.1.1.1 bash -c 'source "$1"' _ "${entry}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *'RUNNER_KATA_DNS must be'* ]]
 
   run env RUNNER_MEMORY=4g RUNNER_KANIKO_SIZE=5g bash -c 'source "$1"' _ "${entry}"
   [ "${status}" -ne 0 ]

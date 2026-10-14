@@ -41,7 +41,7 @@ no SSH push from CI is required.
 │   ├── promote-images.sh             # verify all :sha candidates, then promote signed digests to :latest
 │   ├── setup-apparmor.sh             # one-time: install + load AppArmor profile
 │   ├── setup-egress-policy.sh        # one-time, idempotent: iptables chains INFRA-RUNNER-FWD/-IN for the runner range
-│   ├── setup-kata.sh                 # optional: install pinned Kata Rust shim + QEMU on the host
+│   ├── setup-kata.sh                 # optional: install pinned Kata Rust shim + Cloud Hypervisor on the host
 │   └── check-kata-runner.sh          # optional: validate image, Buildah and egress inside Kata
 ├── seccomp/
 │   └── runner-profile.json           # seccomp: default-ALLOW + small deny-list (replaces Docker's default profile)
@@ -140,6 +140,7 @@ refreshes it every 55 minutes.
 | `SHUTDOWN_CLEANUP` | no | `idle` | On controller stop: `idle` (remove idle runners, let busy ones finish), `all`, or `none` |
 | `RUNNER_MEMORY` | no | `6g` | Memory limit per runner container; tmpfs maxima must leave at least 2 GiB for processes |
 | `RUNNER_RUNTIME` | no | empty | Docker runtime for runner containers only; `kata` opts in, empty uses default runc |
+| `RUNNER_KATA_DNS` | no | `1.1.1.1` | Public IPv4 resolver written inside Kata guests; Docker's embedded `127.0.0.11` did not answer on the isolated bridge in the server probe |
 | `RUNNER_CPUS` | no | `2` | CPU limit per runner container |
 | `RUNNER_KANIKO_SIZE` | no | `2g` | tmpfs size for `/kaniko` inside runner — used as Buildah's `graphRoot` (image layer storage) and Kaniko scratch space |
 | `RUNNER_APPARMOR_PROFILE` | no | `infra-runner` | AppArmor profile name; empty to disable |
@@ -299,6 +300,8 @@ spawn_runner():
      Failed registration/run → cleanup_job (incl. deregistering the JIT runner).
   The runner entrypoint unsets the JIT config / registration token before `exec run.sh`,
   so job steps never inherit it.
+  In Kata mode the controller passes `RUNNER_KATA_DNS`; the entrypoint writes it to
+  `/etc/resolv.conf` before registration and unsets it before job steps.
 
 cleanup_job(job_id [gh_id]):
   docker rm -f runner-job-{id}; docker network rm runner-net-{id}
@@ -697,14 +700,14 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
   `apparmor_restrict_unprivileged_userns=1` blocks `clone(CLONE_NEWUSER)` otherwise) and allows
   `mount,` without restriction. This is the largest residual risk — see README → *Threat model*.
 - **Optional Kata runtime.** `scripts/setup-kata.sh` installs the SHA256-pinned Kata 4.2.0
-  Rust shim and QEMU, registers only the `kata` Docker runtime, and reloads Docker. Run
+  Rust shim and Cloud Hypervisor, registers only the `kata` Docker runtime, and reloads Docker. Run
   `scripts/check-kata-runner.sh IMAGE:verified` as root before setting `RUNNER_RUNTIME=kata`.
   The probe starts the runner image without GitHub registration, builds with Buildah and
   verifies egress DROP counters. Both runc and Kata use the 6g/2g memory defaults; startup
   rejects configurations where maximum tmpfs usage leaves less than 2 GiB for processes.
   Update an existing server `.env` with 4g/5g before deploying this controller image.
   Clearing `RUNNER_RUNTIME` rolls back new runner launches without removing Kata.
-  QEMU/virtiofsd are host-facing attack surfaces; the writable runner layer and
+  Cloud Hypervisor/virtiofsd are host-facing attack surfaces; the writable runner layer and
   `$GITHUB_WORKSPACE` still consume host disk. Compose services remain on runc.
 - **The controller's GitHub credential never enters runner containers.** The controller
   holds either a GitHub App installation token (preferred, auto-refreshed every 55 min) or
