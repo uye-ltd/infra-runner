@@ -1,7 +1,8 @@
 name: Build & Publish Images
 
 # Pull requests: build (and scan) only, with a read-only token.
-# Push to main: build and push :<sha>, sign and scan every digest, then promote :latest.
+# Push to main: run local checks, build and push :<sha>, sign and scan every digest,
+# then promote :latest.
 # The on-server deployer verifies the signature and applies the update — no SSH here.
 #
 # Also enable "Require approval for all outside collaborators" in
@@ -25,6 +26,20 @@ env:
   TRIVY_IMAGE: aquasec/trivy:0.63.0@sha256:6fb0646988fcd2fdf7bf123f7174945ebc2c9c72d1fa1567c8d7daeeb70f8037
 
 jobs:
+  verify:
+    if: github.event_name == 'push'
+    name: verify before publication
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Lint and test
+        run: bash scripts/verify.sh all
+
   build:
     if: github.event_name == 'pull_request'
     name: build (${{ matrix.name }})
@@ -72,6 +87,7 @@ jobs:
 
   publish:
     if: github.event_name == 'push'
+    needs: verify
     name: publish (${{ matrix.name }})
     runs-on: ubuntu-latest
     permissions:

@@ -507,7 +507,8 @@ by digest. Every workflow starts from `permissions: {}` and grants per job.
 ```
 pull_request → job build   (contents: read)
                  checkout (persist-credentials: false) → build + load locally → trivy scan
-push to main → job publish (contents: read, packages: write, id-token: write)
+push to main → job verify (contents: read) → scripts/verify.sh all
+             → job publish (needs verify; contents: read, packages: write, id-token: write)
                  checkout → cosign-installer (v2.2.4) → login ghcr.io
                  → build + push ghcr.io/{owner}/{image}:sha
                  → cosign sign --yes {image}@{digest}   (keyless; auth from the login step)
@@ -518,14 +519,15 @@ push to main → job publish (contents: read, packages: write, id-token: write)
 
 - `concurrency`: publishes are serialised (`cancel-in-progress: false`), so an older build can
   never finish last and move `:latest` backwards; PR builds of the same ref cancel each other.
-- No `:latest` tag moves if any image fails its build, signing or CRITICAL scan. Promotion
+- No `:latest` tag moves if lint, tests, image build, signing or CRITICAL scan fails. Promotion
   across three separate registry tags is sequential, so a registry error during promotion
   can still leave a partially updated set of tags.
 - Trivy reports fixable HIGH findings and blocks on fixable CRITICAL findings; reviewed,
   expiring exceptions live in `.trivyignore.yaml`.
 - `${{ }}` expressions are passed to `run:` via `env:` only (no template injection — zizmor).
 
-**`ci.yml`** — `lint` and `test` call `scripts/verify.sh`, the same local entrypoint.
+**`ci.yml`** — on PRs, `lint` and `test` call `scripts/verify.sh`, the same local entrypoint.
+Pushes to main run the combined checks in `deploy.yml` before publishing.
 
 **`runner-version.yml`** — weekly; fails with an annotation containing the exact
 `ARG RUNNER_VERSION` / `ARG RUNNER_SHA256` lines when actions/runner has a newer release.

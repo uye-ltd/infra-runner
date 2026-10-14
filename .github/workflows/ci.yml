@@ -1,9 +1,8 @@
 name: CI
 
-# Lint + tests on every PR and push to main. scripts/verify.sh is also the local entrypoint.
+# Lint + tests on every PR. The publish workflow runs the same checks on pushes to main
+# and makes them a prerequisite for publishing images.
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
 

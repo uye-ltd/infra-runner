@@ -329,6 +329,7 @@ only what each workflow needs and set the org-level default to read-only:
 
 ```
 push to main
+  → CI runs the same lint, Compose and test checks as bash scripts/verify.sh
   → CI builds images on GitHub-hosted runners (ubuntu-latest)
   → CI pushes each image to GHCR by :sha tag
   → CI signs and scans all three digests, then promotes their verified :sha tags to :latest
@@ -483,10 +484,11 @@ bash scripts/verify.sh         # syntax, linters, Compose, bats and unittest; re
 bash scripts/verify.sh syntax  # host-only syntax checks (no Docker daemon needed)
 ```
 
-CI calls the same script for lint and tests. `deploy.yml` loads PR builds into Docker before
-scanning them. Fixable HIGH vulnerabilities are reported; fixable CRITICAL vulnerabilities
-block publication. Reviewed exceptions go in `.trivyignore.yaml` with an expiration date.
-The `:latest` tag moves only after the digest is signed and passes the scan. See AGENTS.md →
+CI calls the same script for lint and tests; publication waits for those checks on pushes
+to `main`. `deploy.yml` loads PR builds into Docker before scanning them. Fixable HIGH
+vulnerabilities are reported; fixable CRITICAL vulnerabilities block publication. Reviewed
+exceptions go in `.trivyignore.yaml` with an expiration date. The `:latest` tag moves only
+after local checks pass and the digest is signed and passes the scan. See AGENTS.md →
 *Tests* for the test conventions.
 
 ---
