@@ -270,15 +270,38 @@ cleanup_dead_runners() {
 }
 
 # Per-job networks whose runner container no longer exists (e.g. controller killed
-# between `network create` and `docker run`).
+# between JIT registration and `docker run`). Keep the network until any GitHub
+# registration is removed: its job ID is the only durable link to the runner name.
 cleanup_orphan_networks() {
-  local nets ctrs name job_id failed=0
+  local nets ctrs name job_id created_at gh_id now age failed=0 loaded_github=false
   nets=$(docker network ls --filter "label=runner-managed=true" \
-    --format '{{.Name}}|{{.Label "runner-job-id"}}') || return 1
+    --format '{{.Name}}|{{.Label "runner-job-id"}}|{{.Label "runner-created-at"}}') || return 1
   ctrs=$(docker ps -a "${RUNNER_FILTER[@]}" --format '{{.Label "runner-job-id"}}') || return 1
-  while IFS='|' read -r name job_id; do
+  now=$(date +%s)
+  while IFS='|' read -r name job_id created_at; do
     [[ -n "${name}" ]] || continue
     if [[ -z "${job_id}" ]] || ! grep -qxF "${job_id}" <<< "${ctrs}"; then
+      # A spawn still in progress has a network but no container. Give it time
+      # to complete before treating the network as abandoned.
+      if [[ "${created_at}" =~ ^[1-9][0-9]{0,11}$ ]]; then
+        age=$(( now - created_at ))
+        (( age > -120 && age < 120 )) && continue
+      fi
+      if [[ -n "${job_id}" ]]; then
+        if [[ "${loaded_github}" == false ]]; then
+          if ! load_org_runners; then
+            log warn "Cannot check GitHub registrations for orphaned networks; retrying later"
+            return 1
+          fi
+          loaded_github=true
+        fi
+        gh_id="${_GH_ID[runner-job-${job_id}]:-}"
+        if [[ -n "${gh_id}" ]] && ! deregister_runner "${gh_id}"; then
+          log warn "Could not deregister orphaned runner" network "${name}" gh_id "${gh_id}"
+          failed=1
+          continue
+        fi
+      fi
       log info "Removing orphaned network" network "${name}"
       if ! docker network rm "${name}" > /dev/null 2>&1; then
         log warn "Could not remove orphaned network" network "${name}"
@@ -326,14 +349,16 @@ remove_running_runners() {
 # RUNNER_SUBNET_PREFIX. The third octet is derived from the (random) job id and moved on
 # when Docker reports an overlap with an existing network.
 create_runner_network() {
-  local net_name="$1" job_id="$2" attempt octet err
+  local net_name="$1" job_id="$2" attempt octet err created_at
   local base=$(( 16#${job_id:0:2} ))
   # 17 is coprime to 256, so this visits each /24 exactly once before giving up.
   for (( attempt = 0; attempt < 256; attempt++ )); do
     octet=$(( (base + attempt * 17) % 256 ))
+    created_at=$(date +%s)
     if err=$(docker network create --driver bridge --ipv6=false \
                --subnet "${RUNNER_SUBNET_PREFIX}.${octet}.0/24" \
                --label runner-managed=true --label "runner-job-id=${job_id}" \
+               --label "runner-created-at=${created_at}" \
                "${net_name}" 2>&1 > /dev/null); then
       return 0
     fi

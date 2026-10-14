@@ -135,6 +135,58 @@ calls()      { cat "${CALLS}"; }
   grep -q 'docker network rm runner-net-zz' "${CALLS}"
 }
 
+@test "orphaned JIT registration is removed before its network" {
+  DESIRED_IDLE=0
+  echo 'runner-net-aabbccddee|aabbccddee' > "${ST}/nets"
+  gh_runners '{"name":"runner-job-aabbccddee","busy":false,"id":88},{"name":"runner-job-other","busy":false,"id":99}'
+  reconcile_rc
+  [ "${rc}" -eq 0 ]
+  local delete_line network_line
+  delete_line=$(grep -n 'actions/runners/88$' "${CALLS}" | head -1 | cut -d: -f1)
+  network_line=$(grep -n 'docker network rm runner-net-aabbccddee' "${CALLS}" | head -1 | cut -d: -f1)
+  [ "${delete_line}" -lt "${network_line}" ]
+  refute grep -q 'actions/runners/99$' "${CALLS}"
+}
+
+@test "failed orphaned JIT deregistration preserves the network for retry" {
+  DESIRED_IDLE=0
+  echo 'runner-net-aabbccddee|aabbccddee' > "${ST}/nets"
+  gh_runners '{"name":"runner-job-aabbccddee","busy":false,"id":88}'
+  touch "${ST}/delete_fail"
+  reconcile_rc
+  [ "${rc}" -eq 1 ]
+  refute grep -q 'docker network rm runner-net-aabbccddee' "${CALLS}"
+  rm "${ST}/delete_fail"; : > "${CALLS}"
+  reconcile_rc
+  [ "${rc}" -eq 0 ]
+  grep -q 'actions/runners/88$' "${CALLS}"
+  grep -q 'docker network rm runner-net-aabbccddee' "${CALLS}"
+}
+
+@test "GitHub API outage preserves orphaned network for registration cleanup" {
+  DESIRED_IDLE=0
+  echo 'runner-net-aabbccddee|aabbccddee' > "${ST}/nets"
+  touch "${ST}/api_fail"
+  reconcile_rc
+  [ "${rc}" -eq 1 ]
+  refute grep -q 'docker network rm runner-net-aabbccddee' "${CALLS}"
+}
+
+@test "fresh job network is not cleaned while runner creation may still be active" {
+  DESIRED_IDLE=0
+  gh_runners '{"name":"runner-job-aabbccddee","busy":false,"id":88}'
+  echo "runner-net-aabbccddee|aabbccddee|$(date +%s)" > "${ST}/nets"
+  reconcile_rc
+  [ "${rc}" -eq 0 ]
+  refute grep -q 'actions/runners/88$' "${CALLS}"
+  refute grep -q 'docker network rm runner-net-aabbccddee' "${CALLS}"
+  echo "runner-net-aabbccddee|aabbccddee|$(( $(date +%s) - 121 ))" > "${ST}/nets"
+  reconcile_rc
+  [ "${rc}" -eq 0 ]
+  grep -q 'actions/runners/88$' "${CALLS}"
+  grep -q 'docker network rm runner-net-aabbccddee' "${CALLS}"
+}
+
 @test "failed GitHub deregistration fails reconciliation and retries" {
   DESIRED_IDLE=0
   gh_runners ''
@@ -272,6 +324,7 @@ calls()      { cat "${CALLS}"; }
   [ "$(grep -c 'network create' "${CALLS}")" -eq 3 ]
   [ "$(grep -o 'subnet 10\.89\.[0-9]*\.0/24' "${CALLS}" | sort -u | wc -l)" -eq 3 ]
   [ "$(grep -c 'network create --driver bridge --ipv6=false' "${CALLS}")" -eq 3 ]
+  grep -qE -- '--label runner-created-at=[0-9]+' "${CALLS}"
 }
 
 @test "network allocation searches beyond 16 occupied subnets" {

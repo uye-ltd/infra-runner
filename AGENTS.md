@@ -242,7 +242,11 @@ Main loop (every CONTROLLER_POLL_INTERVAL seconds, default 15) — reconcile():
   The loop never exits on an error: a failed step logs a warning and the cycle is retried.
   5. maybe_refresh_github_token()  ← App path: refresh at 55 min; on failure keep the old token, retry next cycle
   6. cleanup_dead_runners()        ← exited/dead/created runners → cleanup_job (+ deregister from GitHub)
-     cleanup_orphan_networks(). Removal/API failures make the cycle unsuccessful and are retried.
+     cleanup_orphan_networks() waits 120 s after network creation, then deregisters any
+     GitHub runner whose exact name matches the orphaned network before removing it.
+     Removal/API failures make the cycle unsuccessful and are retried; network labels
+     preserve the runner name for retry. Older networks without a timestamp are cleaned
+     immediately.
   7. load_org_runners()            ← GET /orgs/{org}/actions/runners → busy flag per runner-job-* name
                                       (API down/malformed page → cycle fails; running jobs remain untouched)
   8. Only a GitHub runner explicitly marked not busy counts as idle; the registration
@@ -291,7 +295,8 @@ shutdown() (SIGTERM/SIGINT), per SHUTDOWN_CLEANUP:
 ```
 
 Logging: structured JSON to stdout (`ts`, `level`, `svc`, `msg`, plus contextual fields).
-All per-job resources carry labels `runner-managed=true` and `runner-job-id={id}`.
+All per-job resources carry labels `runner-managed=true` and `runner-job-id={id}`;
+job networks also carry `runner-created-at={epoch}` for orphan cleanup's 120 s grace.
 
 ---
 
