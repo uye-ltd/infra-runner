@@ -72,7 +72,8 @@ the controls above reduce, but do not remove, these risks:
 
 - Docker + Docker Compose v2 on the host
 - The GitHub org slug you want to attach runners to
-- **One** of the following for authentication (used by both controller and deployer):
+- **One** of the following for authentication (the controller uses either; the deployer
+  uses a PAT only for private GHCR images):
   - **GitHub App** (recommended) — a GitHub App installed on the org with
     *Self-hosted runners: Read & write* and *Members: Read* permissions.
     You will need the App ID, installation ID, and a downloaded private key PEM file.
@@ -514,8 +515,9 @@ release. The build fails at verification if the hash does not match.
 
 ### Option A — GitHub App (recommended)
 
-GitHub App installation tokens are short-lived (1 hour), auto-refreshed by both the controller
-and the deployer, and scoped to a single installation — no manual rotation required.
+GitHub App installation tokens are short-lived (1 hour), auto-refreshed by the controller,
+and scoped to a single installation — no manual rotation required. The deployer pulls public
+GHCR images anonymously on this path.
 
 > **GHCR access:** GitHub App installation tokens cannot authenticate to GHCR regardless of
 > the App's *Packages: Read* permission. With the App path, **runner images must be public**.

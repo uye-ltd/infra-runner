@@ -34,8 +34,8 @@ no SSH push from CI is required.
 │   └── PLUGINS.md                    # plugin descriptor format reference + worked example
 ├── scripts/
 │   ├── bootstrap-images.sh           # first start / recovery: cosign-verify, pull by digest, tag :verified
-│   ├── ghcr-login.sh                 # refresh GHCR credentials on the host (sources github-app-token.sh)
-│   ├── github-app-token.sh           # GitHub App JWT helper (sourced by controller + ghcr-login.sh): RS256 JWT → installation token
+│   ├── ghcr-login.sh                 # GHCR login with classic PAT for private packages
+│   ├── github-app-token.sh           # GitHub App JWT helper (sourced by controller): RS256 JWT → installation token
 │   ├── logging.sh                    # shared structured JSON log() function (sourced by controller + deployer)
 │   ├── promote-images.sh             # verify all :sha candidates, then promote signed digests to :latest
 │   ├── setup-apparmor.sh             # one-time: install + load AppArmor profile
@@ -49,8 +49,9 @@ no SSH push from CI is required.
 │   ├── deployer.bats                 # deployer reconcile + plugin logic vs stubbed docker / cosign
 │   ├── bootstrap-images.bats        # first-start digest verification vs stubbed Docker / cosign
 │   ├── promote-images.bats           # release promotion gate vs stubbed cosign / Docker
+│   ├── ghcr-login.bats               # host GHCR login auth path vs stubbed Docker
 │   ├── test_health_server.py         # health server (stdlib unittest)
-│   └── stubs/{controller,deployer,promotion}/  # fake docker, cosign, curl, uuidgen
+│   └── stubs/{controller,deployer,ghcr,promotion}/  # fake docker, cosign, curl, uuidgen
 ├── .hadolint.yaml
 └── .github/
     ├── dependabot.yml                # weekly PRs: Dockerfiles, docker-compose.yml, Actions
