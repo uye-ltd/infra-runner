@@ -39,11 +39,33 @@ calls()      { cat "${CALLS}"; }
   refute grep -q registration-token "${CALLS}"
 }
 
-@test "GitHub API down: all runners treated as idle, no spawn, cycle survives" {
+@test "GitHub API down: no spawn, cycle fails without killing running jobs" {
   touch "${ST}/api_fail"
   running 'runner-job-a|a|' 'runner-job-b|b|'
   reconcile_rc
-  [ "${rc}" -eq 0 ]
+  [ "${rc}" -eq 1 ]
+  refute grep -q '^docker run' "${CALLS}"
+  refute grep -q '^docker rm' "${CALLS}"
+}
+
+@test "malformed GitHub response cannot mark the cycle healthy or spawn runners" {
+  printf '{"message":"partial response"}' > "${ST}/gh_runners"
+  reconcile_rc
+  [ "${rc}" -eq 1 ]
+  refute grep -q '^docker run' "${CALLS}"
+
+  printf '{"runners":[{"name":"runner-job-a","busy":"false","id":1}]}' > "${ST}/gh_runners"
+  reconcile_rc
+  [ "${rc}" -eq 1 ]
+  refute grep -q '^docker run' "${CALLS}"
+}
+
+@test "a failed later GitHub page prevents spawning from a partial busy map" {
+  jq -nc '{runners: [range(100) | {name: ("runner-job-" + tostring), busy: false, id: .}]}' \
+    > "${ST}/gh_runners_page_1"
+  touch "${ST}/api_fail_page_2"
+  reconcile_rc
+  [ "${rc}" -eq 1 ]
   refute grep -q '^docker run' "${CALLS}"
 }
 
@@ -64,11 +86,11 @@ calls()      { cat "${CALLS}"; }
   grep -q 'actions/runners/55$' "${CALLS}"
 }
 
-@test "no spawn while the verified runner image is missing locally" {
+@test "missing verified runner image makes the cycle unhealthy without spawning" {
   gh_runners ''
   touch "${ST}/no_image"
   reconcile_rc
-  [ "${rc}" -eq 0 ]
+  [ "${rc}" -eq 1 ]
   refute grep -q '^docker run' "${CALLS}"
 }
 
@@ -126,8 +148,7 @@ calls()      { cat "${CALLS}"; }
 
 @test "SIGTERM during the poll sleep exits promptly" {
   gh_runners ''
-  touch "${ST}/no_image"
-  CONTROLLER_POLL_INTERVAL=60 bash "${BATS_TEST_DIRNAME}/../controller/entrypoint.sh" > /dev/null 2>&1 &
+  CONTROLLER_POLL_INTERVAL=60 DESIRED_IDLE=0 bash "${BATS_TEST_DIRNAME}/../controller/entrypoint.sh" > /dev/null 2>&1 &
   pid=$!
   sleep 2
   start=$(date +%s)
@@ -135,4 +156,16 @@ calls()      { cat "${CALLS}"; }
   wait "${pid}"
   (( $(date +%s) - start < 5 ))
   [ -s "${HEARTBEAT_FILE}" ]
+}
+
+@test "zero poll interval, zero pids limit and invalid subnet fail at startup" {
+  local entry="${BATS_TEST_DIRNAME}/../controller/entrypoint.sh"
+  run env CONTROLLER_POLL_INTERVAL=0 bash -c 'source "$1"' _ "${entry}"
+  [ "${status}" -ne 0 ]
+  run env RUNNER_PIDS_LIMIT=0 bash -c 'source "$1"' _ "${entry}"
+  [ "${status}" -ne 0 ]
+  run env RUNNER_SUBNET_PREFIX=10.999 bash -c 'source "$1"' _ "${entry}"
+  [ "${status}" -ne 0 ]
+  run env DESIRED_IDLE=08 bash -c 'source "$1"' _ "${entry}"
+  [ "${status}" -ne 0 ]
 }

@@ -242,7 +242,7 @@ Main loop (every CONTROLLER_POLL_INTERVAL seconds, default 15) — reconcile():
   6. cleanup_dead_runners()        ← exited/dead/created runners → cleanup_job (+ deregister from GitHub)
      cleanup_orphan_networks()
   7. load_org_runners()            ← GET /orgs/{org}/actions/runners → busy flag per runner-job-* name
-                                      (API down → all running runners are treated as idle)
+                                      (API down/malformed page → cycle fails; running jobs remain untouched)
   8. needed = min(DESIRED_IDLE - idle, MAX_RUNNERS - total); spawn in parallel and wait.
      Spawn failure → exponential backoff (poll interval × 2^n, max 300 s).
   9. touch /tmp/heartbeat on a successful cycle (compose healthcheck: stale > 5 min = unhealthy)

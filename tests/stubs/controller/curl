@@ -5,7 +5,14 @@ echo "curl $*" >> "${CALLS}"
 url="${*: -1}"
 [[ -f "${ST}/api_fail" ]] && { printf 'err\n500'; exit 0; }
 case "${url}" in
-  *"actions/runners?per_page"*) printf '%s\n200' "$(cat "${ST}/gh_runners")" ;;
+  *"actions/runners?per_page"*)
+    page="${url##*page=}"
+    [[ -f "${ST}/api_fail_page_${page}" ]] && { printf 'err\n500'; exit 0; }
+    if [[ -f "${ST}/gh_runners_page_${page}" ]]; then
+      printf '%s\n200' "$(cat "${ST}/gh_runners_page_${page}")"
+    else
+      printf '%s\n200' "$(cat "${ST}/gh_runners")"
+    fi ;;
   *generate-jitconfig)          printf '{"runner":{"id":77},"encoded_jit_config":"JITXYZ"}\n201' ;;
   *actions/runners/*)           printf '\n404' ;;
 esac

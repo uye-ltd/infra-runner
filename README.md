@@ -19,7 +19,7 @@ Per job (created and destroyed by the controller):
 └── runner-job-{id}    ephemeral runner (Buildah + fuse-overlayfs primary; Kaniko compat)
 ```
 
-**Controller** keeps `DESIRED_IDLE` runners idle (default 2), up to `MAX_RUNNERS` in total; busy/idle state comes from the GitHub API. When a runner finishes its job it exits; the controller tears down its per-job resources and spawns a replacement. A controller restart or update adopts running runners instead of killing them.
+**Controller** keeps `DESIRED_IDLE` runners idle (default 2), up to `MAX_RUNNERS` in total; busy/idle state comes from the GitHub API. When a runner finishes its job it exits; the controller tears down its per-job resources and spawns a replacement. A controller restart or update adopts running runners instead of killing them. If the GitHub runner list is unavailable or malformed, the controller keeps existing jobs and marks its reconcile cycle unsuccessful; it does not spawn from incomplete busy data.
 
 **Runner containers** have no Docker socket and no privileged flag. Image builds use **Buildah** with **fuse-overlayfs** (daemonless, no `--privileged`). The `kaniko` binary is also present for backward compatibility. The controller's credential (GitHub App token or PAT) never enters runner containers — only a single-use JIT runner config is injected at spawn time, and it is removed from the environment before any job step runs.
 
@@ -197,7 +197,7 @@ Copy `.env.example` to `.env`. Exactly one auth path must be configured:
 | `COMPOSE_PROJECT_NAME` | yes | `infra-runner` | Compose project name used by the deployer for every compose call and to find its containers; keep it stable |
 | `POLL_INTERVAL` | no | `60` | Seconds between GHCR digest checks |
 | `HEALTH_PORT` | no | `8080` | Port for the deployer health endpoint |
-| `CONTROLLER_POLL_INTERVAL` | no | `15` | Seconds between controller pool maintenance cycles |
+| `CONTROLLER_POLL_INTERVAL` | no | `15` | Seconds between controller pool maintenance cycles (1–240; heartbeat expires after 300s) |
 | `SELF_UPDATE_TIMEOUT` | no | `120` | Max seconds to wait for the deployer self-update helper |
 | `PLUGIN_HOOK_TIMEOUT` | no | `300` | Default timeout for plugin post-deploy hooks |
 | `PLUGIN_HOOK_ENV` | no | — | Env var names passed to all plugin hooks (see `deployer/PLUGINS.md`) |

@@ -55,11 +55,23 @@ source "${SCRIPTS_DIR}/logging.sh"
 die() { log error "$1"; exit 1; }
 
 for _v in DESIRED_IDLE MAX_RUNNERS RUNNER_PIDS_LIMIT RUNNER_GROUP_ID CONTROLLER_POLL_INTERVAL; do
-  [[ "${!_v}" =~ ^[0-9]+$ ]] || die "${_v} must be a non-negative integer (got '${!_v}')"
+  # Reject leading zeroes as well: Bash arithmetic treats values such as 08 as octal.
+  [[ "${!_v}" =~ ^(0|[1-9][0-9]{0,12})$ ]] \
+    || die "${_v} must be a non-negative decimal integer (got '${!_v}')"
 done
+(( DESIRED_IDLE <= 1000 )) || die "DESIRED_IDLE must be at most 1000"
+(( MAX_RUNNERS <= 1000 )) || die "MAX_RUNNERS must be at most 1000"
+(( RUNNER_PIDS_LIMIT >= 1 && RUNNER_PIDS_LIMIT <= 1048576 )) \
+  || die "RUNNER_PIDS_LIMIT must be between 1 and 1048576"
+(( RUNNER_GROUP_ID >= 1 )) || die "RUNNER_GROUP_ID must be positive"
+(( CONTROLLER_POLL_INTERVAL >= 1 && CONTROLLER_POLL_INTERVAL <= 240 )) \
+  || die "CONTROLLER_POLL_INTERVAL must be between 1 and 240 (heartbeat expires after 300s)"
 case "${RUNNER_REGISTRATION_MODE}" in jit|token) ;; *) die "RUNNER_REGISTRATION_MODE must be jit or token";; esac
 case "${SHUTDOWN_CLEANUP}" in idle|all|none) ;; *) die "SHUTDOWN_CLEANUP must be idle, all or none";; esac
-[[ "${RUNNER_SUBNET_PREFIX}" =~ ^[0-9]{1,3}\.[0-9]{1,3}$ ]] || die "RUNNER_SUBNET_PREFIX must look like 10.89"
+[[ "${RUNNER_SUBNET_PREFIX}" =~ ^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$ ]] \
+  || die "RUNNER_SUBNET_PREFIX must look like 10.89"
+(( BASH_REMATCH[1] >= 1 && BASH_REMATCH[1] <= 223 && BASH_REMATCH[2] <= 255 )) \
+  || die "RUNNER_SUBNET_PREFIX octets must form a valid IPv4 network prefix"
 
 # ---------------------------------------------------------------------------
 # Authentication — GitHub App (preferred) or static PAT (backward compat)
@@ -145,17 +157,33 @@ gh_api() {
 declare -gA _GH_BUSY=() _GH_ID=()
 load_org_runners() {
   _GH_BUSY=(); _GH_ID=()
-  local page=1 body n name busy id
+  local page=1 body parsed records n name busy id
   while true; do
     body=$(gh_api GET "/orgs/${GITHUB_ORG}/actions/runners?per_page=100&page=${page}") || return 1
+    # Validate the entire page before using any of it. A 2xx response with malformed or
+    # incomplete JSON must not make busy runners appear idle.
+    parsed=$(jq -ec '
+      if (.runners | type) != "array" then error("missing runners array") else .runners end
+      | if any(.[]; (.name | type) != "string" or (.busy | type) != "boolean" or (.id | type) != "number")
+        then error("invalid runner record") else . end
+      | {count: length, runners: [.[] | select(.name | startswith("runner-job-"))]}
+    ' <<< "${body}") || {
+      log warn "Invalid GitHub runner list response" page "${page}"
+      return 1
+    }
+    records=$(jq -r '.runners[] | "\(.name)|\(.busy)|\(.id)"' <<< "${parsed}") || return 1
     while IFS='|' read -r name busy id; do
       [[ -n "${name}" ]] || continue
       _GH_BUSY["${name}"]="${busy}"
       _GH_ID["${name}"]="${id}"
-    done < <(jq -r '.runners[] | select(.name | startswith("runner-job-")) | "\(.name)|\(.busy)|\(.id)"' <<< "${body}")
-    n=$(jq '.runners | length' <<< "${body}")
+    done <<< "${records}"
+    n=$(jq -r '.count' <<< "${parsed}") || return 1
     (( n < 100 )) && break
     page=$(( page + 1 ))
+    if (( page > 1000 )); then
+      log warn "GitHub runner list exceeded 1000 pages"
+      return 1
+    fi
   done
   return 0
 }
@@ -390,23 +418,19 @@ reconcile() {
     || log warn "Token refresh failed — keeping current token, retrying next cycle"
 
   cleanup_dead_runners || { log warn "Could not list exited runners"; return 1; }
-  cleanup_orphan_networks || log warn "Could not clean orphaned networks"
+  cleanup_orphan_networks || { log warn "Could not clean orphaned networks"; return 1; }
 
   local running
   running=$(list_running_runners) || { log warn "Could not list running runners"; return 1; }
 
-  local total=0 idle=0 name job_id gh_id api_ok=true
-  load_org_runners || api_ok=false
+  load_org_runners || { log warn "Could not query runner busy state"; return 1; }
+  local total=0 idle=0 name job_id gh_id
   while IFS='|' read -r name job_id gh_id; do
     [[ -n "${name}" ]] || continue
     total=$(( total + 1 ))
     # A runner not (yet) listed by GitHub is still registering → counts as idle.
     [[ "${_GH_BUSY[${name}]:-false}" == true ]] || idle=$(( idle + 1 ))
   done <<< "${running}"
-  if [[ "${api_ok}" == false ]]; then
-    log warn "Could not query runner busy state — treating all runners as idle"
-  fi
-
   local needed=$(( DESIRED_IDLE - idle ))
   local room=$(( MAX_RUNNERS - total ))
   (( room < needed )) && needed=${room}
@@ -418,13 +442,13 @@ reconcile() {
         image "${RUNNER_IMAGE}"
       _image_missing_logged=true
     fi
-    return 0
+    return 1
   fi
   _image_missing_logged=false
 
   local now; now=$(date +%s)
   if (( now < _next_spawn_at )); then
-    return 0
+    return 1
   fi
 
   log info "Spawning runners" total "${total}" idle "${idle}" desired_idle "${DESIRED_IDLE}" \
@@ -437,7 +461,7 @@ reconcile() {
   for p in "${pids[@]}"; do wait "${p}" || failed=$(( failed + 1 )); done
 
   if (( failed > 0 )); then
-    _spawn_failures=$(( _spawn_failures + 1 ))
+    (( _spawn_failures < 10 )) && _spawn_failures=$(( _spawn_failures + 1 ))
     local delay=$(( CONTROLLER_POLL_INTERVAL * (1 << (_spawn_failures - 1)) ))
     (( delay > 300 )) && delay=300
     _next_spawn_at=$(( now + delay ))
