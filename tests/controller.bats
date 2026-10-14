@@ -86,6 +86,52 @@ calls()      { cat "${CALLS}"; }
   grep -q 'actions/runners/55$' "${CALLS}"
 }
 
+@test "failed dead-runner removal fails reconciliation and retries" {
+  DESIRED_IDLE=0
+  gh_runners ''
+  running 'runner-job-a|a|1'
+  echo 'zz|55|Exited (1) 3 seconds ago' > "${ST}/exited"
+  touch "${ST}/rm_fail"
+  reconcile_rc
+  [ "${rc}" -eq 1 ]
+  grep -q 'docker rm -f runner-job-zz' "${CALLS}"
+  rm "${ST}/rm_fail"; : > "${CALLS}"
+  reconcile_rc
+  [ "${rc}" -eq 0 ]
+  grep -q 'docker rm -f runner-job-zz' "${CALLS}"
+}
+
+@test "failed orphan-network removal fails reconciliation and retries" {
+  DESIRED_IDLE=0
+  gh_runners ''
+  running 'runner-job-a|a|1'
+  echo 'runner-net-zz|zz' > "${ST}/nets"
+  touch "${ST}/network_rm_fail"
+  reconcile_rc
+  [ "${rc}" -eq 1 ]
+  grep -q 'docker network rm runner-net-zz' "${CALLS}"
+  rm "${ST}/network_rm_fail"; : > "${CALLS}"
+  reconcile_rc
+  [ "${rc}" -eq 0 ]
+  grep -q 'docker network rm runner-net-zz' "${CALLS}"
+}
+
+@test "failed GitHub deregistration fails reconciliation and retries" {
+  DESIRED_IDLE=0
+  gh_runners ''
+  echo 'zz|55|Exited (1) 3 seconds ago' > "${ST}/exited"
+  touch "${ST}/delete_fail"
+  reconcile_rc
+  [ "${rc}" -eq 1 ]
+  grep -q 'actions/runners/55$' "${CALLS}"
+  refute grep -q 'docker rm -f runner-job-zz' "${CALLS}"
+  rm "${ST}/delete_fail"; : > "${CALLS}"
+  reconcile_rc
+  [ "${rc}" -eq 0 ]
+  grep -q 'actions/runners/55$' "${CALLS}"
+  grep -q 'docker rm -f runner-job-zz' "${CALLS}"
+}
+
 @test "missing verified runner image makes the cycle unhealthy without spawning" {
   gh_runners ''
   touch "${ST}/no_image"
@@ -118,6 +164,16 @@ calls()      { cat "${CALLS}"; }
   remove_running_runners idle > /dev/null
   grep -q 'rm -f runner-job-a' "${CALLS}"
   refute grep -q 'rm -f runner-job-b' "${CALLS}"
+}
+
+@test "shutdown all removes containers even when GitHub deregistration fails" {
+  running 'runner-job-a|a|1'
+  touch "${ST}/delete_fail"
+  if remove_running_runners all > /dev/null; then
+    echo 'Expected cleanup to report failed GitHub deregistration' >&2
+    return 1
+  fi
+  grep -q 'docker rm -f runner-job-a' "${CALLS}"
 }
 
 @test "job networks get explicit /24s in RUNNER_SUBNET_PREFIX and move on overlap" {

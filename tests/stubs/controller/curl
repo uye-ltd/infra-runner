@@ -14,5 +14,6 @@ case "${url}" in
       printf '%s\n200' "$(cat "${ST}/gh_runners")"
     fi ;;
   *generate-jitconfig)          printf '{"runner":{"id":77},"encoded_jit_config":"JITXYZ"}\n201' ;;
-  *actions/runners/*)           printf '\n404' ;;
+  *actions/runners/*)
+    if [[ -f "${ST}/delete_fail" ]]; then printf 'err\n500'; else printf '\n404'; fi ;;
 esac

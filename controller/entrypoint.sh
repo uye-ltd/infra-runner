@@ -207,26 +207,41 @@ fetch_registration_token() {
 
 RUNNER_FILTER=(--filter "label=runner-managed=true" --filter "label=runner-role=runner")
 
-# cleanup_job JOB_ID [GH_RUNNER_ID]
+# cleanup_job JOB_ID [GH_RUNNER_ID] [FORCE_LOCAL]
 cleanup_job() {
-  local job_id="$1" gh_id="${2:-}"
-  docker rm -f "runner-job-${job_id}" > /dev/null 2>&1 || true
-  docker network rm "runner-net-${job_id}" > /dev/null 2>&1 || true
-  deregister_runner "${gh_id}" || true
+  local job_id="$1" gh_id="${2:-}" force_local="${3:-false}"
+  local failed=0
+  # Keep the stopped container (and its runner-gh-id label) until GitHub accepts
+  # deregistration. Otherwise a transient API failure loses the ID needed to retry.
+  if ! deregister_runner "${gh_id}"; then
+    log warn "Could not deregister runner" job_id "${job_id}" gh_id "${gh_id}"
+    [[ "${force_local}" == true ]] || return 1
+    failed=1
+  fi
+  if ! docker rm -f "runner-job-${job_id}" > /dev/null 2>&1; then
+    log warn "Could not remove runner container" job_id "${job_id}"
+    failed=1
+  fi
+  if ! docker network rm "runner-net-${job_id}" > /dev/null 2>&1; then
+    log warn "Could not remove runner network" job_id "${job_id}"
+    failed=1
+  fi
+  return "${failed}"
 }
 
 # Run cleanup_job for each "job_id|gh_id" line in parallel and wait for all of them.
 # (Background jobs are started from THIS shell, not from a `| while` subshell, so
 # `wait` really waits for them.)
 cleanup_jobs_parallel() {
-  local lines="$1" job_id gh_id pids=()
+  local lines="$1" force_local="${2:-false}" job_id gh_id pids=() failed=0
   while IFS='|' read -r job_id gh_id; do
     [[ -n "${job_id}" ]] || continue
-    cleanup_job "${job_id}" "${gh_id}" &
+    cleanup_job "${job_id}" "${gh_id}" "${force_local}" &
     pids+=("$!")
   done <<< "${lines}"
   local p
-  for p in "${pids[@]}"; do wait "${p}" || true; done
+  for p in "${pids[@]}"; do wait "${p}" || failed=1; done
+  return "${failed}"
 }
 
 # Exited, dead, or never-started (created) runner containers.
@@ -246,7 +261,7 @@ cleanup_dead_runners() {
 # Per-job networks whose runner container no longer exists (e.g. controller killed
 # between `network create` and `docker run`).
 cleanup_orphan_networks() {
-  local nets ctrs name job_id
+  local nets ctrs name job_id failed=0
   nets=$(docker network ls --filter "label=runner-managed=true" \
     --format '{{.Name}}|{{.Label "runner-job-id"}}') || return 1
   ctrs=$(docker ps -a "${RUNNER_FILTER[@]}" --format '{{.Label "runner-job-id"}}') || return 1
@@ -254,9 +269,13 @@ cleanup_orphan_networks() {
     [[ -n "${name}" ]] || continue
     if [[ -z "${job_id}" ]] || ! grep -qxF "${job_id}" <<< "${ctrs}"; then
       log info "Removing orphaned network" network "${name}"
-      docker network rm "${name}" > /dev/null 2>&1 || true
+      if ! docker network rm "${name}" > /dev/null 2>&1; then
+        log warn "Could not remove orphaned network" network "${name}"
+        failed=1
+      fi
     fi
   done <<< "${nets}"
+  return "${failed}"
 }
 
 # Prints "name|job_id|gh_id" per running runner container.
@@ -283,7 +302,9 @@ remove_running_runners() {
     log info "Removing runner" job_id "${job_id}" mode "${mode}"
     todo+="${job_id}|${gh_id}"$'\n'
   done <<< "${running}"
-  cleanup_jobs_parallel "${todo}"
+  local force_local=false
+  [[ "${mode}" == all ]] && force_local=true
+  cleanup_jobs_parallel "${todo}" "${force_local}"
 }
 
 # ---------------------------------------------------------------------------

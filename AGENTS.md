@@ -240,7 +240,7 @@ Main loop (every CONTROLLER_POLL_INTERVAL seconds, default 15) — reconcile():
   The loop never exits on an error: a failed step logs a warning and the cycle is retried.
   5. maybe_refresh_github_token()  ← App path: refresh at 55 min; on failure keep the old token, retry next cycle
   6. cleanup_dead_runners()        ← exited/dead/created runners → cleanup_job (+ deregister from GitHub)
-     cleanup_orphan_networks()
+     cleanup_orphan_networks(). Removal/API failures make the cycle unsuccessful and are retried.
   7. load_org_runners()            ← GET /orgs/{org}/actions/runners → busy flag per runner-job-* name
                                       (API down/malformed page → cycle fails; running jobs remain untouched)
   8. needed = min(DESIRED_IDLE - idle, MAX_RUNNERS - total); spawn in parallel and wait.

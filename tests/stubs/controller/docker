@@ -11,6 +11,7 @@ case "$1" in
     exit 0 ;;
   network)
     if [[ "$2" == ls ]]; then cat "${ST}/nets" 2>/dev/null; exit 0; fi
+    [[ "$2" == rm && -f "${ST}/network_rm_fail" ]] && exit 1
     if [[ "$2" == create && -f "${ST}/overlaps" ]]; then
       n=$(cat "${ST}/overlaps")
       if (( n > 0 )); then
@@ -22,5 +23,5 @@ case "$1" in
     exit 0 ;;
   image) [[ -f "${ST}/no_image" ]] && exit 1; exit 0 ;;
   run)   [[ -f "${ST}/run_fail" ]] && exit 1; echo cid ;;
-  rm)    exit 0 ;;
+  rm)    [[ -f "${ST}/rm_fail" ]] && exit 1; exit 0 ;;
 esac
