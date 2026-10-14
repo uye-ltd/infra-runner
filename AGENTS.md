@@ -23,7 +23,7 @@ no SSH push from CI is required.
 ├── .env.example                      # template for required env vars (copy → .env)
 ├── .gitignore
 ├── apparmor/
-│   └── infra-runner                    # AppArmor profile applied to every runner container
+│   └── infra-runner                    # runner AppArmor profile (verify compatibility with Kata)
 ├── controller/
 │   ├── Dockerfile                    # controller image (ubuntu:24.04 + docker-ce-cli + jq + openssl + uuidgen)
 │   └── entrypoint.sh                 # pool manager: spawn/teardown ephemeral runners
@@ -40,7 +40,9 @@ no SSH push from CI is required.
 │   ├── logging.sh                    # shared structured JSON log() function (sourced by controller + deployer)
 │   ├── promote-images.sh             # verify all :sha candidates, then promote signed digests to :latest
 │   ├── setup-apparmor.sh             # one-time: install + load AppArmor profile
-│   └── setup-egress-policy.sh        # one-time, idempotent: iptables chains INFRA-RUNNER-FWD/-IN for the runner range
+│   ├── setup-egress-policy.sh        # one-time, idempotent: iptables chains INFRA-RUNNER-FWD/-IN for the runner range
+│   ├── setup-kata.sh                 # optional: install pinned Kata Rust shim + QEMU on the host
+│   └── check-kata-runner.sh          # optional: validate image, Buildah and egress inside Kata
 ├── seccomp/
 │   └── runner-profile.json           # seccomp: default-ALLOW + small deny-list (replaces Docker's default profile)
 ├── tests/
@@ -88,10 +90,12 @@ docker-compose (fixed service subnets in 172.20.0.0/16)
 
 Per job — created by controller, destroyed after job completes:
 ├── runner-net-{id}     isolated bridge network (10.89.x.x/24, egress-restricted)
-└── runner-job-{id}     ephemeral runner (Buildah + fuse-overlayfs for image builds)
+└── runner-job-{id}     ephemeral runner (runc by default; optional per-runner Kata VM)
 ```
 
-The runner container has no Docker socket and no privileged flag. Image builds use
+The runner container has no Docker socket and no privileged flag. With
+`RUNNER_RUNTIME=kata`, each runner has its own guest kernel; Compose services remain on
+Docker's default `runc` runtime. Image builds use
 **Buildah** with **fuse-overlayfs** storage, which builds OCI images entirely in userspace
 without a daemon or a privileged container. The `kaniko` binary is also present for
 backward compatibility with existing workflows. The controller's GitHub credential (App
@@ -134,9 +138,10 @@ refreshes it every 55 minutes.
 | `RUNNER_REGISTRATION_MODE` | no | `jit` | `jit` (single-use JIT config) or `token` (legacy registration token, reusable for 1 h) |
 | `RUNNER_GROUP_ID` | no | `1` | Runner group for JIT registration (`1` = Default) |
 | `SHUTDOWN_CLEANUP` | no | `idle` | On controller stop: `idle` (remove idle runners, let busy ones finish), `all`, or `none` |
-| `RUNNER_MEMORY` | no | `4g` | Memory limit per runner container |
+| `RUNNER_MEMORY` | no | `6g` | Memory limit per runner container; tmpfs maxima must leave at least 2 GiB for processes |
+| `RUNNER_RUNTIME` | no | empty | Docker runtime for runner containers only; `kata` opts in, empty uses default runc |
 | `RUNNER_CPUS` | no | `2` | CPU limit per runner container |
-| `RUNNER_KANIKO_SIZE` | no | `5g` | tmpfs size for `/kaniko` inside runner — used as Buildah's `graphRoot` (image layer storage) and Kaniko scratch space |
+| `RUNNER_KANIKO_SIZE` | no | `2g` | tmpfs size for `/kaniko` inside runner — used as Buildah's `graphRoot` (image layer storage) and Kaniko scratch space |
 | `RUNNER_APPARMOR_PROFILE` | no | `infra-runner` | AppArmor profile name; empty to disable |
 | `RUNNER_SECCOMP_HOST_PATH` | no | — | Path to `seccomp/runner-profile.json` **inside the controller**. The docker CLI reads the file client-side and sends its contents to the daemon; compose mounts the repo's profile at `/home/ghrunner/infra-runner/seccomp/runner-profile.json`, which is why the usual value looks like a host path |
 | `RUNNER_SUBNET_PREFIX` | no | `10.89` | Job networks get explicit /24s from `<prefix>.0.0/16`; keep in sync with `RUNNER_SUBNET` of `setup-egress-policy.sh` |
@@ -278,6 +283,7 @@ spawn_runner():
                  → require a nonempty string token before starting a container
   d. docker run -d --pull never runner image → runner-job-{id}
        --network runner-net-{id}  --memory --cpus --pids-limit
+       [--runtime RUNNER_RUNTIME]  (empty means Docker default runc)
        --cap-add CHOWN DAC_OVERRIDE FOWNER SETUID SETGID SYS_PTRACE SYS_ADMIN
        [--security-opt seccomp=RUNNER_SECCOMP_HOST_PATH]
        [--security-opt apparmor=RUNNER_APPARMOR_PROFILE]
@@ -690,6 +696,16 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
   namespace). The AppArmor profile **grants** both, grants `userns,` (Ubuntu 24.04's
   `apparmor_restrict_unprivileged_userns=1` blocks `clone(CLONE_NEWUSER)` otherwise) and allows
   `mount,` without restriction. This is the largest residual risk — see README → *Threat model*.
+- **Optional Kata runtime.** `scripts/setup-kata.sh` installs the SHA256-pinned Kata 4.2.0
+  Rust shim and QEMU, registers only the `kata` Docker runtime, and reloads Docker. Run
+  `scripts/check-kata-runner.sh IMAGE:verified` as root before setting `RUNNER_RUNTIME=kata`.
+  The probe starts the runner image without GitHub registration, builds with Buildah and
+  verifies egress DROP counters. Both runc and Kata use the 6g/2g memory defaults; startup
+  rejects configurations where maximum tmpfs usage leaves less than 2 GiB for processes.
+  Update an existing server `.env` with 4g/5g before deploying this controller image.
+  Clearing `RUNNER_RUNTIME` rolls back new runner launches without removing Kata.
+  QEMU/virtiofsd are host-facing attack surfaces; the writable runner layer and
+  `$GITHUB_WORKSPACE` still consume host disk. Compose services remain on runc.
 - **The controller's GitHub credential never enters runner containers.** The controller
   holds either a GitHub App installation token (preferred, auto-refreshed every 55 min) or
   a static PAT. Runners receive only a single-use JIT config (default), which is unset from the environment

@@ -16,12 +16,12 @@ docker-compose
 
 Per job (created and destroyed by the controller):
 ├── runner-net-{id}    isolated bridge network (10.89.x.x, egress-restricted)
-└── runner-job-{id}    ephemeral runner (Buildah + fuse-overlayfs primary; Kaniko compat)
+└── runner-job-{id}    ephemeral runner (optional Kata VM; Buildah + fuse-overlayfs)
 ```
 
 **Controller** keeps `DESIRED_IDLE` runners idle (default 2), up to `MAX_RUNNERS` in total; busy/idle state comes from the GitHub API. A local runner counts as idle only when GitHub explicitly reports it idle and, for JIT runners, its registration ID matches; unknown registrations still count toward the total cap. When a runner finishes its job it exits; the controller tears down its per-job resources and spawns a replacement. A controller restart or update adopts running runners instead of killing them. If a crash leaves a job network without a container, the controller waits 120 seconds from network creation, removes any matching JIT registration in GitHub, then deletes the network. If the GitHub runner list is unavailable or malformed, the controller keeps existing jobs and marks its reconcile cycle unsuccessful; it does not spawn from incomplete busy data. It validates the JIT registration response and confirms a new container is running before counting a spawn as successful. Failed container/network cleanup or GitHub deregistration also fails the cycle and is retried; the controller heartbeat stays stale until a cycle succeeds.
 
-**Runner containers** have no Docker socket and no privileged flag. Image builds use **Buildah** with **fuse-overlayfs** (daemonless, no `--privileged`). The `kaniko` binary is also present for backward compatibility. The controller's credential (GitHub App token or PAT) never enters runner containers — only a single-use JIT runner config is injected at spawn time, and it is removed from the environment before any job step runs.
+**Runner containers** have no Docker socket and no privileged flag. With `RUNNER_RUNTIME=kata`, each runs in a separate Kata VM with its own kernel; the Docker default and all Compose services remain on `runc`. Image builds use **Buildah** with **fuse-overlayfs** (daemonless, no `--privileged`). The `kaniko` binary is also present for backward compatibility. The controller's credential (GitHub App token or PAT) never enters runner containers — only a single-use JIT runner config is injected at spawn time, and it is removed from the environment before any job step runs.
 
 ---
 
@@ -47,9 +47,11 @@ the controls above reduce, but do not remove, these risks:
 
 1. **Runners hold `CAP_SYS_ADMIN` with a permissive seccomp profile.** Buildah's user-namespace
    setup (full-range `/etc/subuid` mapping) needs it; AppArmor allows `mount` without restriction
-   and the custom seccomp profile allows syscalls Docker's default would block. A kernel bug
-   reachable through these interfaces is a host escape. Dropping `SYS_ADMIN` (narrow subuid
-   range + `BUILDAH_ISOLATION=chroot`) is planned but must be validated on the server first.
+   and the custom seccomp profile allows syscalls Docker's default would block. With the default
+   `runc` runtime, a kernel bug reachable through these interfaces can escape to the host.
+   Kata places these capabilities in a guest kernel, but the QEMU/virtiofsd host processes
+   and their device interfaces become the new host-facing attack surface. A VM escape remains
+   possible, so do not treat Kata as complete protection for Vault and edge.
 2. **Controller and deployer are host-root-equivalent.** The socket proxy filters API paths, not
    request bodies; whoever controls either container can start a privileged container. Both
    run with all capabilities dropped and receive no job input.
@@ -120,6 +122,37 @@ The AppArmor script installs `apparmor/infra-runner` and loads it. The controlle
 
 The controller and deployer services use fixed subnets in `172.20.0.0/16` and are not
 subject to the runner egress rules.
+
+---
+
+## Optional Kata runner isolation
+
+Kata 4.2.0 uses the Rust shim with QEMU for this deployment. It requires a Linux x86-64
+host with KVM, vhost-vsock, cgroup v2 and Docker Engine 26 or newer. Install it after
+checking that `/opt` has free space and that the runner egress chains are active:
+
+```bash
+sudo bash scripts/setup-kata.sh
+sudo bash scripts/check-kata-runner.sh ghcr.io/your-org/infra-runner:verified
+```
+
+The installer SHA256-verifies the pinned archive, merges only the `kata` runtime into
+`daemon.json`, reloads Docker and checks that its default runtime remains `runc`. If
+Docker does not accept the runtime after reload, stop and arrange a maintenance window
+for a Docker restart; do not restart it while Vault is serving traffic. The probe uses
+the runner's resource, capability, tmpfs, FUSE, AppArmor and seccomp flags without
+registering a GitHub runner. It must pass the Buildah and firewall checks before rollout.
+
+Set `RUNNER_MEMORY=6g` and `RUNNER_KANIKO_SIZE=2g` in the server `.env` before deploying
+the controller version with memory validation. Once the probe passes, set
+`RUNNER_RUNTIME=kata` and run `docker compose up -d controller`; then run a real
+Buildah workflow as the final acceptance test. Idle runners are replaced; busy
+ones finish on their original runtime. To roll back, set
+`RUNNER_RUNTIME=` and run the same Compose command. The tmpfs sizes are maximums, not
+RAM allocated at startup, but their contents count against the memory limit.
+Monitor controller logs, failed spawns, QEMU processes and disk use. The runner's
+writable layer, including `$GITHUB_WORKSPACE`, still resides on host storage and can
+fill it; Kata does not change the egress policy or the host-root-equivalent controller.
 
 ---
 
@@ -194,9 +227,10 @@ account that owns the PAT), and leave the App vars unset.
 | `RUNNER_REGISTRATION_MODE` | no | `jit` | `jit` (single-use) or `token` (legacy, reusable for 1 h) |
 | `RUNNER_GROUP_ID` | no | `1` | Runner group for JIT registration |
 | `SHUTDOWN_CLEANUP` | no | `idle` | On controller stop: `idle`, `all` or `none` |
-| `RUNNER_MEMORY` | no | `4g` | Memory limit per runner container |
+| `RUNNER_MEMORY` | no | `6g` | Memory limit per runner container; must leave 2 GiB beyond all three tmpfs size limits |
+| `RUNNER_RUNTIME` | no | empty | Docker runtime for runners only; `kata` opts in, empty uses Docker's default |
 | `RUNNER_CPUS` | no | `2` | CPU limit per runner container |
-| `RUNNER_KANIKO_SIZE` | no | `5g` | tmpfs size for Kaniko scratch space inside runner |
+| `RUNNER_KANIKO_SIZE` | no | `2g` | tmpfs size for Buildah layers and Kaniko scratch space inside runner |
 | `RUNNER_APPARMOR_PROFILE` | no | `infra-runner` | AppArmor profile name; empty to disable |
 | `RUNNER_SECCOMP_HOST_PATH` | no | — | Path to `seccomp/runner-profile.json` as seen from inside the controller container (mounted in via `docker-compose.yml`) |
 | `RUNNER_SUBNET_PREFIX` | no | `10.89` | Job networks get explicit /24s from `<prefix>.0.0/16`; keep in sync with `RUNNER_SUBNET` of `setup-egress-policy.sh` |
@@ -285,7 +319,7 @@ Notes:
 - `--isolation=chroot` is required: the default OCI isolation would have Buildah start each `RUN` step through an OCI runtime with its own set of namespaces, which this container's capability/AppArmor set is not built for; chroot isolation runs `RUN` steps inside the job container itself.
 - Runner containers are spawned with `--cap-add SYS_PTRACE --cap-add SYS_ADMIN` — both are required for Buildah's user-namespace setup (the kernel's `proc_setgroups_open` calls `ptrace_may_access` across namespace boundaries, and writing full-range uid_map entries requires `CAP_SYS_ADMIN`). The AppArmor profile grants them. See *Threat model*.
 - Sign **by digest**, not by tag — tags are mutable; the deployer verifies by digest.
-- Buildah storage is preconfigured in the image (`/etc/containers/storage.conf`: overlay via fuse-overlayfs, `graphroot=/kaniko`, `runroot=/tmp/buildah-run`) — no setup step is needed. `/kaniko` is the controller-mounted tmpfs (`RUNNER_KANIKO_SIZE`, default `5g`); increase it if your image layers are large.
+- Buildah storage is preconfigured in the image (`/etc/containers/storage.conf`: overlay via fuse-overlayfs, `graphroot=/kaniko`, `runroot=/tmp/buildah-run`) — no setup step is needed. `/kaniko` is the controller-mounted tmpfs (`RUNNER_KANIKO_SIZE`, default `2g`); increase it together with `RUNNER_MEMORY` if your image layers are large.
 
 **Kaniko (compat)**
 

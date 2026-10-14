@@ -24,10 +24,11 @@ DESIRED_IDLE="${DESIRED_IDLE:-2}"
 # pre-existing behaviour of a fixed-size pool; raise it to keep idle runners warm
 # while jobs are executing.
 MAX_RUNNERS="${MAX_RUNNERS:-${DESIRED_IDLE}}"
-RUNNER_MEMORY="${RUNNER_MEMORY:-4g}"
+RUNNER_MEMORY="${RUNNER_MEMORY:-6g}"
 RUNNER_CPUS="${RUNNER_CPUS:-2}"
 RUNNER_PIDS_LIMIT="${RUNNER_PIDS_LIMIT:-4096}"
-RUNNER_KANIKO_SIZE="${RUNNER_KANIKO_SIZE:-5g}"
+RUNNER_KANIKO_SIZE="${RUNNER_KANIKO_SIZE:-2g}"
+RUNNER_RUNTIME="${RUNNER_RUNTIME:-}"
 # `-` not `:-`: unset → default profile, explicitly empty → AppArmor disabled (as documented).
 RUNNER_APPARMOR_PROFILE="${RUNNER_APPARMOR_PROFILE-infra-runner}"
 RUNNER_SECCOMP_HOST_PATH="${RUNNER_SECCOMP_HOST_PATH:-}"
@@ -68,6 +69,20 @@ done
 (( RUNNER_GROUP_ID >= 1 )) || die "RUNNER_GROUP_ID must be positive"
 (( CONTROLLER_POLL_INTERVAL >= 1 && CONTROLLER_POLL_INTERVAL <= 240 )) \
   || die "CONTROLLER_POLL_INTERVAL must be between 1 and 240 (heartbeat expires after 300s)"
+[[ -z "${RUNNER_RUNTIME}" || "${RUNNER_RUNTIME}" =~ ^[a-z0-9][a-z0-9._-]*$ ]] \
+  || die "RUNNER_RUNTIME must be empty or contain only lowercase letters, digits, dots, underscores and hyphens"
+# tmpfs size= is a maximum, not preallocated RAM. Still, if all three mounts
+# fill, leave at least 2 GiB for the runner, build processes and guest services.
+size_bytes() {
+  local value="${1^^}"
+  [[ "${value}" =~ ^([1-9][0-9]*(\.[0-9]+)?)([BKMG]?)$ ]] || return 1
+  [[ "${value}" != *B ]] || value="${value%B}"
+  numfmt --from=iec "${value}" 2>/dev/null
+}
+memory_bytes=$(size_bytes "${RUNNER_MEMORY}") || die "RUNNER_MEMORY must be a positive Docker memory size (got '${RUNNER_MEMORY}')"
+kaniko_bytes=$(size_bytes "${RUNNER_KANIKO_SIZE}") || die "RUNNER_KANIKO_SIZE must be a positive Docker memory size (got '${RUNNER_KANIKO_SIZE}')"
+(( kaniko_bytes + 1024 * 1024 * 1024 + 512 * 1024 * 1024 + 2 * 1024 * 1024 * 1024 <= memory_bytes )) \
+  || die "RUNNER_MEMORY must exceed RUNNER_KANIKO_SIZE + 1g (/tmp) + 512m (/root) by at least 2g"
 case "${RUNNER_REGISTRATION_MODE}" in jit|token) ;; *) die "RUNNER_REGISTRATION_MODE must be jit or token";; esac
 case "${SHUTDOWN_CLEANUP}" in idle|all|none) ;; *) die "SHUTDOWN_CLEANUP must be idle, all or none";; esac
 [[ "${RUNNER_SUBNET_PREFIX}" =~ ^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$ ]] \
@@ -440,10 +455,13 @@ spawn_runner() {
   local security_opts=()
   [[ -n "${RUNNER_SECCOMP_HOST_PATH}" ]] && security_opts+=(--security-opt "seccomp=${RUNNER_SECCOMP_HOST_PATH}")
   [[ -n "${RUNNER_APPARMOR_PROFILE}" ]] && security_opts+=(--security-opt "apparmor=${RUNNER_APPARMOR_PROFILE}")
+  local runtime_opts=()
+  [[ -n "${RUNNER_RUNTIME}" ]] && runtime_opts+=(--runtime "${RUNNER_RUNTIME}")
 
   # --pull never: only run an image the deployer has already pulled after verifying
   # its signature; never let `docker run` fetch an unverified :latest on its own.
   if ! docker run -d --pull never \
+       "${runtime_opts[@]}" \
        --name "${runner_ctr}" \
        --network "${net_name}" \
        --memory="${RUNNER_MEMORY}" \
