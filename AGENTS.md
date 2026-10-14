@@ -183,7 +183,7 @@ Docker's default seccomp profile.
 ## Dockerfile details (runner image)
 
 - **Base**: `ubuntu:24.04`
-- **Build args**: `RUNNER_VERSION` (default `2.334.0`) and `RUNNER_SHA256` (SHA256 of the tarball).
+- **Build args**: `RUNNER_VERSION` (default `2.338.0`) and `RUNNER_SHA256` (SHA256 of the tarball).
   Both must be updated together when bumping the runner — see *Updating the runner binary* below.
 - **Docker CLI**: `docker-ce-cli` only — no daemon. Used for `docker login` (writes registry
   credentials to `~/.docker/config.json`). `docker build`/`run`/`push` have no daemon to reach.
@@ -195,8 +195,7 @@ Docker's default seccomp profile.
   of the original (Google archived on 2025-06-03); published by the `kaniko-build` org.
   Tag + digest pinned.
 - **Base images**: all three Dockerfiles use `ubuntu:24.04@sha256:…` (Dependabot bumps tag + digest).
-- **cosign / Vault CLIs**: downloaded by version and verified against a SHA256 pinned in the
-  Dockerfile (`COSIGN_SHA256`, `VAULT_SHA256`) — not against a checksum file from the same source.
+- **cosign / Vault CLIs**: copied from official version- and digest-pinned images.
 - **Runner binary**: downloaded from `github.com/actions/runner/releases`, SHA256-verified
   before extraction, then extracted to `/opt/actions-runner/`.
 - **User**: root — required by Buildah and Kaniko to extract image layers and execute `RUN`
