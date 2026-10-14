@@ -1,7 +1,11 @@
-FROM ubuntu:24.04
+# Digest-pinned; Dependabot bumps tag + digest together.
+FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
 
 ARG RUNNER_VERSION=2.334.0
 ARG RUNNER_SHA256=048024cd2c848eb6f14d5646d56c13a4def2ae7ee3ad12122bee960c56f3d271
+
+ARG COSIGN_VERSION=2.2.4
+ARG COSIGN_SHA256=97a6a1e15668a75fc4ff7a4dc4cb2f098f929cbea2f12faa9de31db6b42b17d7
 
 ARG VAULT_VERSION=1.19.2
 ARG VAULT_SHA256=c6781c3e0ec431f39bcc8f1443d09f3b8944c90c348e91aa13182b4e1fd2797f
@@ -28,8 +32,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Kaniko executor — kept for backward compat with workflows that call `kaniko` directly.
 # Sourced from the Chainguard community fork (original archived by Google 2025-06-03).
-# Version pinned so Dependabot can track updates and builds are reproducible.
-COPY --from=ghcr.io/kaniko-build/dist/chainguard-forks-kaniko/executor:v1.25.14 /kaniko/executor /usr/local/bin/kaniko
+# Tag + digest pinned so a re-pushed tag cannot substitute a different binary.
+COPY --from=ghcr.io/kaniko-build/dist/chainguard-forks-kaniko/executor:v1.25.14@sha256:f77cd662e4bd55c052c5db1e030b532d324be92143ee274e58dadec30472b2ee /kaniko/executor /usr/local/bin/kaniko
 
 # Buildah + fuse-overlayfs — primary daemonless image builder.
 # fuse-overlayfs provides copy-on-write layer storage over FUSE (no kernel overlay mount,
@@ -40,7 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       uidmap \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /etc/containers \
-    && printf '[storage]\n  driver = "overlay"\n  graphRoot = "/kaniko"\n\n[storage.options]\n\n  [storage.options.overlay]\n    mount_program = "/usr/bin/fuse-overlayfs"\n' \
+    && printf '[storage]\n  driver = "overlay"\n  graphroot = "/kaniko"\n  runroot = "/tmp/buildah-run"\n\n[storage.options]\n\n  [storage.options.overlay]\n    mount_program = "/usr/bin/fuse-overlayfs"\n' \
        > /etc/containers/storage.conf \
     && echo "root:0:4294967295" > /etc/subuid \
     && echo "root:0:4294967295" > /etc/subgid
@@ -63,15 +67,13 @@ RUN apt-get update \
 # Cosign — baked in because the self-hosted server's SSL connection to
 # github.com/releases times out during job execution; image builds run on
 # GitHub-hosted runners where the connection succeeds. Same pattern as Vault.
-# Version pinned; bump here when bumping cosign-release in vault's ci.yml.
+# Version AND SHA256 pinned here: a checksum file downloaded from the same release only
+# detects corruption, not a swapped asset. Bump both (and cosign-release in vault's ci.yml).
 RUN cd /tmp \
     && curl -fsSL \
-      "https://github.com/sigstore/cosign/releases/download/v2.2.4/cosign-linux-amd64" \
+      "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64" \
       -o cosign-linux-amd64 \
-    && curl -fsSL \
-      "https://github.com/sigstore/cosign/releases/download/v2.2.4/cosign_checksums.txt" \
-    | grep ' cosign-linux-amd64$' \
-    | sha256sum -c - \
+    && echo "${COSIGN_SHA256}  cosign-linux-amd64" | sha256sum -c - \
     && install -m 0755 cosign-linux-amd64 /usr/local/bin/cosign \
     && rm cosign-linux-amd64
 

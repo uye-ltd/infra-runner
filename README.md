@@ -32,10 +32,10 @@ Per job (created and destroyed by the controller):
 | Malicious job leaves persistent state | Container destroyed after every job (`--ephemeral`) |
 | Privileged container escape | No privileged flag — Buildah + fuse-overlayfs builds in userspace, no DinD |
 | Credential theft | Controller credential (App token or PAT) stays in the controller; runners get only a single-use JIT config, unset before job steps run |
-| Docker socket abuse | Socket proxy allows only required API endpoints; `EXEC` and `BUILD` disabled on both proxies |
+| Docker socket abuse | Socket proxy allows only required API path groups (`EXEC`, `BUILD`, `AUTH` disabled). It does not inspect request bodies, so controller/deployer remain host-root-equivalent; both run with all capabilities dropped and `no-new-privileges` |
 | Supply chain / image tampering | cosign keyless signing in CI; deployer pulls only the digest cosign verified and the stack runs only the local `:verified` tag; runner binary SHA256-verified at build time; CI actions pinned to commit SHAs |
 | Resource abuse (mining, DoS) | `--memory` and `--cpus` limits on every runner container; socket proxies capped at 128 MB / 0.25 CPU |
-| Network exfiltration / lateral movement | Egress policy: DNS + HTTPS only; private RFC 1918 ranges blocked |
+| Network exfiltration / lateral movement | Egress policy: DNS + HTTPS only; private, link-local and CGNAT ranges and the host itself blocked |
 | Kernel-level container escape | `seccomp/runner-profile.json` blocks `mount`, `kexec_*`, `bpf`, kernel module syscalls |
 | File system / capability abuse | AppArmor profile grants `sys_ptrace` and `sys_admin` (required for buildah user-namespace setup: `proc_setgroups_open` calls `ptrace_may_access`, and full-range uid_map writes require `CAP_SYS_ADMIN`); grants `userns` (Ubuntu 24.04 blocks `clone(CLONE_NEWUSER)` without this); denies `sys_module`, `net_raw`, sysfs writes, kernel tunables, and host credential reads |
 | Stranger PRs triggering jobs | GitHub setting: require approval for outside collaborators (see below) |
@@ -64,24 +64,29 @@ Per job (created and destroyed by the controller):
 Run as root before starting the stack for the first time.
 
 ```bash
-# Network egress policy — restricts runner containers to DNS + HTTPS only,
-# blocks private networks, configures Docker address pool for job networks
+# Network egress policy — restricts runner networks to DNS + HTTPS, blocks private
+# ranges and the host itself (idempotent; re-run after editing the script)
 sudo bash ~/infra-runner/scripts/setup-egress-policy.sh
-sudo systemctl restart docker   # required for address pool change to take effect
 
 # AppArmor profile — MAC layer restricting runner capabilities and file access
 sudo bash ~/infra-runner/scripts/setup-apparmor.sh
 # Verify: aa-status | grep infra-runner
 ```
 
-The egress script allocates job networks from `10.89.0.0/16` and adds iptables
-`DOCKER-USER` rules restricting that subnet to DNS and HTTPS only.
+The controller creates every job network with an explicit `/24` from
+`RUNNER_SUBNET_PREFIX.0.0/16` (default `10.89.0.0/16`). The egress script installs two
+dedicated iptables chains for that range — `INFRA-RUNNER-FWD` (jumped from `DOCKER-USER`:
+DNS + HTTPS to the internet only; private, link-local and CGNAT ranges dropped) and
+`INFRA-RUNNER-IN` (jumped from `INPUT`: runners cannot reach services on the host itself,
+except a host-local DNS resolver). Other rules on the host are left untouched. If an older
+version of the script set Docker's `default-address-pools` to the runner range, it prints
+migration steps — that pool placed every other compose network under the runner rules.
 
 The AppArmor script installs `apparmor/infra-runner` and loads it. The controller passes
 `--security-opt apparmor=infra-runner` to every runner container.
 
-The controller and deployer services each have their own isolated network in
-`172.20.0.0/24` and are not subject to the runner egress rules.
+The controller and deployer services use fixed subnets in `172.20.0.0/16` and are not
+subject to the runner egress rules.
 
 ---
 
@@ -160,6 +165,9 @@ Copy `.env.example` to `.env`. Exactly one auth path must be configured:
 | `RUNNER_KANIKO_SIZE` | no | `5g` | tmpfs size for Kaniko scratch space inside runner |
 | `RUNNER_APPARMOR_PROFILE` | no | `infra-runner` | AppArmor profile name; empty to disable |
 | `RUNNER_SECCOMP_HOST_PATH` | no | — | Path to `seccomp/runner-profile.json` as seen from inside the controller container (mounted in via `docker-compose.yml`) |
+| `RUNNER_SUBNET_PREFIX` | no | `10.89` | Job networks get explicit /24s from `<prefix>.0.0/16`; keep in sync with `RUNNER_SUBNET` of `setup-egress-policy.sh` |
+| `GITHUB_APP_PRIVATE_KEY_HOST_PATH` | no | `/home/ghrunner/.ssh/github-app.pem` | Host path of the App key, mounted into the controller |
+| `HEALTH_BIND` | no | `0.0.0.0` | Host address the health port is published on; `127.0.0.1` keeps it off public interfaces (published ports bypass ufw) |
 | `COMPOSE_PROJECT_NAME` | yes | `infra-runner` | Must match the directory name on the server |
 | `POLL_INTERVAL` | no | `60` | Seconds between GHCR digest checks |
 | `HEALTH_PORT` | no | `8080` | Port for the deployer health endpoint |
@@ -213,11 +221,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Configure Buildah storage
-        run: |
-          printf '[storage]\n  driver = "overlay"\n  graphRoot = "/kaniko"\n  runRoot = "/tmp/buildah-run"\n\n[storage.options]\n\n  [storage.options.overlay]\n    mount_program = "/usr/bin/fuse-overlayfs"\n' \
-            > /etc/containers/storage.conf
-
       - name: Build and push with Buildah
         id: build
         run: |
@@ -244,8 +247,7 @@ Notes:
 - `--isolation=chroot` is required: Ubuntu 24.04's AppArmor profile grants `userns` for working-container setup, but chroot is used for `RUN` instruction execution as defence-in-depth.
 - Runner containers are spawned with `--cap-add SYS_PTRACE --cap-add SYS_ADMIN` — both are required for buildah's user-namespace setup path (the kernel's `proc_setgroups_open` calls `ptrace_may_access` across namespace boundaries, and writing full-range uid_map entries requires `CAP_SYS_ADMIN`). The AppArmor profile explicitly grants these capabilities rather than denying them.
 - Sign **by digest**, not by tag — tags are mutable; the deployer verifies by digest.
-- `graphRoot=/kaniko` reuses the controller-mounted tmpfs (`RUNNER_KANIKO_SIZE`, default `5g`). Increase if your image layers are large.
-- `runRoot=/tmp/buildah-run` is required when an explicit `graphRoot` is set (see storage.conf comment in the Configure step).
+- Buildah storage is preconfigured in the image (`/etc/containers/storage.conf`: overlay via fuse-overlayfs, `graphroot=/kaniko`, `runroot=/tmp/buildah-run`) — no setup step is needed. `/kaniko` is the controller-mounted tmpfs (`RUNNER_KANIKO_SIZE`, default `5g`); increase it if your image layers are large.
 
 **Kaniko (compat)**
 
@@ -462,17 +464,14 @@ and the deployer, and scoped to a single installation — no manual rotation req
 3. Install the App on the org and note the **installation ID** (visible in the URL of the
    install page: `github.com/organizations/YOUR_ORG/settings/installations/<id>`).
 4. Generate a private key (PEM) from the App settings page and store it on the server.
-5. Mount the PEM file into **both** the controller and deployer containers and set the three env vars
-   on each service:
+5. Set the App variables in `.env`. `docker-compose.yml` mounts the key into the
+   **controller** only (the deployer needs no GitHub credential):
 
-```yaml
-# In docker-compose.yml, under both controller: and deployer:
-environment:
-  GITHUB_APP_ID: "123456"
-  GITHUB_APP_INSTALLATION_ID: "78901234"
-  GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github_app_key
-volumes:
-  - /path/on/host/github-app.pem:/run/secrets/github_app_key:ro
+```bash
+GITHUB_APP_ID=123456
+GITHUB_APP_INSTALLATION_ID=78901234
+GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github_app_key           # path inside the container
+GITHUB_APP_PRIVATE_KEY_HOST_PATH=/home/ghrunner/.ssh/github-app.pem  # path on the host (default)
 ```
 
 ### Option B — Classic PAT (backward compat)

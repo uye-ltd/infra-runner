@@ -1,21 +1,31 @@
 #!/bin/bash
 # setup-egress-policy.sh
 #
-# One-time setup script. Run as root on the server before starting the stack.
+# One-time setup script (idempotent — safe to re-run). Run as root on the server.
 #
-# What it does:
-#   1. Configures Docker to allocate job networks from 10.89.0.0/16 so
-#      runner containers have a predictable, dedicated subnet.
-#   2. Adds iptables rules in the DOCKER-USER chain to restrict traffic
-#      from that subnet: DNS and HTTPS only, private networks blocked.
-#   3. Persists the rules across reboots via iptables-persistent.
+# Restricts traffic from runner job networks (RUNNER_SUBNET, default 10.89.0.0/16 — the
+# controller creates every per-job network with an explicit /24 from this range):
 #
-# The controller/deployer compose services are explicitly assigned 172.20.0.0/24
-# (see docker-compose.yml) and are NOT affected by these rules.
+#   FORWARD (via DOCKER-USER → INFRA-RUNNER-FWD)
+#     - private, link-local (cloud metadata) and CGNAT ranges: DROP (no lateral movement)
+#     - DNS (53) and HTTPS (443) to the internet: allowed
+#     - everything else: DROP
+#   INPUT (→ INFRA-RUNNER-IN)
+#     - traffic from runners to the HOST itself (its gateway / public IPs — sshd, published
+#       ports, anything listening on 0.0.0.0): DROP, except DNS to a host-local resolver
+#
+# The rules live in dedicated chains that this script flushes and refills; it only adds
+# jump rules to DOCKER-USER and INPUT, so other rules on the host are left untouched.
+# Allowed traffic RETURNs (not ACCEPTs), so Docker's own isolation chains still apply.
+#
+# Options (env): RUNNER_SUBNET=10.89.0.0/16   PERSIST=1 (save with netfilter-persistent)
 set -euo pipefail
 
-RUNNER_SUBNET="10.89.0.0/16"
-DAEMON_CONFIG="/etc/docker/daemon.json"
+RUNNER_SUBNET="${RUNNER_SUBNET:-10.89.0.0/16}"
+PERSIST="${PERSIST:-1}"
+FWD_CHAIN=INFRA-RUNNER-FWD
+IN_CHAIN=INFRA-RUNNER-IN
+BLOCKED_RANGES=(10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10)
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "ERROR: must run as root" >&2
@@ -23,115 +33,103 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 1. Patch Docker daemon config to use dedicated address pool for job networks
+# 0. Migration from earlier versions of this script
 # ---------------------------------------------------------------------------
+# Earlier versions (a) flushed DOCKER-USER and wrote the rules straight into it and
+# (b) set Docker's default-address-pools to the runner range, which also placed every
+# OTHER compose network (e.g. plugin networks) under the runner egress rules.
 
-echo "Configuring Docker address pool..."
+# (a) Remove the exact rules the old version appended to DOCKER-USER (if present).
+legacy_rules=(
+  "-m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
+  "-s ${RUNNER_SUBNET} -d 10.0.0.0/8 -j DROP"
+  "-s ${RUNNER_SUBNET} -d 172.16.0.0/12 -j DROP"
+  "-s ${RUNNER_SUBNET} -d 192.168.0.0/16 -j DROP"
+  "-s ${RUNNER_SUBNET} -d 169.254.0.0/16 -j DROP"
+  "-s ${RUNNER_SUBNET} -p udp --dport 53 -j ACCEPT"
+  "-s ${RUNNER_SUBNET} -p tcp --dport 53 -j ACCEPT"
+  "-s ${RUNNER_SUBNET} -p tcp --dport 443 -j ACCEPT"
+  "-s ${RUNNER_SUBNET} -j DROP"
+)
+if iptables -L DOCKER-USER -n > /dev/null 2>&1; then
+  for rule in "${legacy_rules[@]}"; do
+    # shellcheck disable=SC2086  # rule is a list of iptables arguments
+    while iptables -D DOCKER-USER ${rule} 2>/dev/null; do :; done
+  done
+fi
 
-if [[ -f "${DAEMON_CONFIG}" ]]; then
-  # Merge into existing config — preserve any other settings
-  if ! command -v jq &>/dev/null; then
-    echo "ERROR: jq is required. Install with: apt-get install -y jq" >&2
-    exit 1
-  fi
-  jq '. + {"default-address-pools": [{"base": "10.89.0.0/16", "size": 24}]}' \
-    "${DAEMON_CONFIG}" > "${DAEMON_CONFIG}.tmp"
-  mv "${DAEMON_CONFIG}.tmp" "${DAEMON_CONFIG}"
-else
-  cat > "${DAEMON_CONFIG}" <<'EOF'
-{
-  "default-address-pools": [
-    {"base": "10.89.0.0/16", "size": 24}
-  ]
-}
+# (b) Only warn: editing daemon.json requires a Docker restart and recreating networks.
+if [[ -f /etc/docker/daemon.json ]] && command -v jq > /dev/null \
+   && jq -e --arg s "${RUNNER_SUBNET}" '."default-address-pools"[]? | select(.base == $s)' /etc/docker/daemon.json > /dev/null; then
+  cat >&2 <<EOF
+WARNING: /etc/docker/daemon.json sets default-address-pools to ${RUNNER_SUBNET} (from an
+older version of this script). Docker then allocates EVERY network without an explicit
+subnet from the runner range, so those networks are subject to the runner egress rules.
+The controller now assigns runner subnets explicitly, so the pool is no longer needed:
+  1. remove the "default-address-pools" entry for ${RUNNER_SUBNET} from daemon.json
+  2. systemctl restart docker
+  3. recreate affected non-runner networks: docker network ls; docker network inspect …
+     (e.g. 'docker compose down && docker compose up -d' in the owning project)
 EOF
 fi
 
-echo "  Written to ${DAEMON_CONFIG}"
-echo "  NOTE: Docker must be restarted for the address pool to take effect."
-echo "        Run: systemctl restart docker"
-echo "        Existing networks are unaffected; only new networks use the pool."
-echo
+# ---------------------------------------------------------------------------
+# 1. FORWARD: runner → elsewhere
+# ---------------------------------------------------------------------------
+echo "Configuring ${FWD_CHAIN} for ${RUNNER_SUBNET}..."
+
+iptables -L DOCKER-USER -n > /dev/null 2>&1 || iptables -N DOCKER-USER
+iptables -N "${FWD_CHAIN}" 2>/dev/null || true
+iptables -F "${FWD_CHAIN}"
+
+iptables -A "${FWD_CHAIN}" -s "${RUNNER_SUBNET}" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+for range in "${BLOCKED_RANGES[@]}"; do
+  iptables -A "${FWD_CHAIN}" -s "${RUNNER_SUBNET}" -d "${range}" -j DROP
+done
+iptables -A "${FWD_CHAIN}" -s "${RUNNER_SUBNET}" -p udp --dport 53  -j RETURN
+iptables -A "${FWD_CHAIN}" -s "${RUNNER_SUBNET}" -p tcp --dport 53  -j RETURN
+# HTTPS only. HTTP (80) and git+ssh (22) are intentionally blocked; to allow git+ssh add
+#   iptables -I INFRA-RUNNER-FWD <n> -s <subnet> -p tcp --dport 22 -j RETURN  before the final DROP.
+iptables -A "${FWD_CHAIN}" -s "${RUNNER_SUBNET}" -p tcp --dport 443 -j RETURN
+iptables -A "${FWD_CHAIN}" -s "${RUNNER_SUBNET}" -j DROP
+
+iptables -C DOCKER-USER -j "${FWD_CHAIN}" 2>/dev/null || iptables -I DOCKER-USER 1 -j "${FWD_CHAIN}"
 
 # ---------------------------------------------------------------------------
-# 2. Set up iptables rules in DOCKER-USER
-#
-# DOCKER-USER is jumped to first in the FORWARD chain and persists across
-# Docker restarts (Docker flushes its own chains but not DOCKER-USER).
+# 2. INPUT: runner → the host itself
 # ---------------------------------------------------------------------------
+echo "Configuring ${IN_CHAIN} for ${RUNNER_SUBNET}..."
 
-echo "Configuring iptables egress policy for ${RUNNER_SUBNET}..."
+iptables -N "${IN_CHAIN}" 2>/dev/null || true
+iptables -F "${IN_CHAIN}"
+iptables -A "${IN_CHAIN}" -s "${RUNNER_SUBNET}" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+# DNS: Docker's embedded resolver may forward from the container's namespace to a
+# resolver on the host.
+iptables -A "${IN_CHAIN}" -s "${RUNNER_SUBNET}" -p udp --dport 53 -j RETURN
+iptables -A "${IN_CHAIN}" -s "${RUNNER_SUBNET}" -p tcp --dport 53 -j RETURN
+iptables -A "${IN_CHAIN}" -s "${RUNNER_SUBNET}" -j DROP
 
-# Ensure DOCKER-USER chain exists (Docker creates it, but may not exist yet
-# if Docker hasn't run). Create it if missing.
-if ! iptables -L DOCKER-USER &>/dev/null; then
-  iptables -N DOCKER-USER
-fi
-
-# Flush existing DOCKER-USER rules to make this script idempotent
-iptables -F DOCKER-USER
-
-# Allow established/related connections (must be first — applies to all traffic)
-iptables -A DOCKER-USER \
-  -m conntrack --ctstate ESTABLISHED,RELATED \
-  -j ACCEPT
-
-# --- Runner egress allowlist (source: 10.89.0.0/16) ---
-
-# Block runners from reaching private/internal networks
-# (prevents lateral movement to host services, other containers, LAN)
-iptables -A DOCKER-USER -s "${RUNNER_SUBNET}" -d 10.0.0.0/8     -j DROP
-iptables -A DOCKER-USER -s "${RUNNER_SUBNET}" -d 172.16.0.0/12  -j DROP
-iptables -A DOCKER-USER -s "${RUNNER_SUBNET}" -d 192.168.0.0/16 -j DROP
-iptables -A DOCKER-USER -s "${RUNNER_SUBNET}" -d 169.254.0.0/16 -j DROP  # link-local / cloud metadata
-
-# Allow DNS (required for hostname resolution)
-iptables -A DOCKER-USER -s "${RUNNER_SUBNET}" -p udp --dport 53 -j ACCEPT
-iptables -A DOCKER-USER -s "${RUNNER_SUBNET}" -p tcp --dport 53 -j ACCEPT
-
-# Allow HTTPS only — covers GitHub API, GHCR, Docker Hub, git over HTTPS
-# HTTP (80) and git+ssh (22) are intentionally blocked.
-# To allow git+ssh: add -p tcp --dport 22 -j ACCEPT before the DROP rule.
-iptables -A DOCKER-USER -s "${RUNNER_SUBNET}" -p tcp --dport 443 -j ACCEPT
-
-# Block all other egress from runners
-iptables -A DOCKER-USER -s "${RUNNER_SUBNET}" -j DROP
-
-# Pass non-runner traffic back to Docker's own chains unchanged
-iptables -A DOCKER-USER -j RETURN
+iptables -C INPUT -j "${IN_CHAIN}" 2>/dev/null || iptables -I INPUT 1 -j "${IN_CHAIN}"
 
 echo "  Rules applied."
-echo
 
 # ---------------------------------------------------------------------------
-# 3. Persist rules across reboots
+# 3. Persist across reboots
 # ---------------------------------------------------------------------------
-
-echo "Persisting iptables rules..."
-
-if ! command -v netfilter-persistent &>/dev/null; then
-  echo "  Installing iptables-persistent..."
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -q iptables-persistent
+if [[ "${PERSIST}" == 1 ]]; then
+  echo "Persisting iptables rules..."
+  if ! command -v netfilter-persistent > /dev/null; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q iptables-persistent
+  fi
+  netfilter-persistent save
+  echo "  Saved to /etc/iptables/rules.v4"
 fi
 
-netfilter-persistent save
-echo "  Rules saved to /etc/iptables/rules.v4"
-echo
+cat <<EOF
 
-# ---------------------------------------------------------------------------
-# Summary
-# ---------------------------------------------------------------------------
-
-echo "Done. Egress policy active."
-echo
-echo "Runner containers (${RUNNER_SUBNET}) may only reach:"
-echo "  - DNS     : UDP/TCP port 53"
-echo "  - HTTPS   : TCP port 443"
-echo
-echo "Blocked from runners:"
-echo "  - Private networks (10/8, 172.16/12, 192.168/16, 169.254/16)"
-echo "  - All other ports and protocols"
-echo
-echo "Next step: restart Docker to activate the address pool."
-echo "  systemctl restart docker"
-echo "  docker compose up -d"
+Done. Runner networks (${RUNNER_SUBNET}) may only reach:
+  - DNS   : UDP/TCP 53 (internet, or a resolver on the host)
+  - HTTPS : TCP 443 (internet)
+Blocked: ${BLOCKED_RANGES[*]}, the host itself, all other ports/protocols.
+IPv6 is not covered — keep Docker's IPv6 disabled for runner networks (the default).
+EOF

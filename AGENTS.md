@@ -38,7 +38,7 @@ no SSH push from CI is required.
 │   ├── github-app-token.sh           # GitHub App JWT helper (sourced by controller + ghcr-login.sh): RS256 JWT → installation token
 │   ├── logging.sh                    # shared structured JSON log() function (sourced by controller + deployer)
 │   ├── setup-apparmor.sh             # one-time: install + load AppArmor profile
-│   └── setup-egress-policy.sh        # one-time: configure Docker address pool + iptables egress rules
+│   └── setup-egress-policy.sh        # one-time, idempotent: iptables chains INFRA-RUNNER-FWD/-IN for the runner range
 ├── seccomp/
 │   └── runner-profile.json           # seccomp deny-list: blocks kernel-escape syscalls
 └── .github/
@@ -52,7 +52,7 @@ no SSH push from CI is required.
 ## Architecture
 
 ```
-docker-compose (172.20.0.0/24 service space)
+docker-compose (fixed service subnets in 172.20.0.0/16)
 │
 ├── controller-proxy  (tecnativa/docker-socket-proxy — 172.20.0.0/26)
 │   └── /var/run/docker.sock:ro  ← filters API; EXEC + BUILD disabled
@@ -86,7 +86,9 @@ a single-use JIT runner config (see *Security notes*).
 
 ## Environment variables
 
-Loaded from `.env` (via `env_file` in Compose).
+Set in `.env`. The deployer loads the whole file (`env_file`, plugin hooks need arbitrary vars);
+the controller receives only the variables listed in its compose `environment:` block — add new
+controller settings there.
 
 **Authentication** — exactly one of the following two paths must be configured:
 
@@ -116,7 +118,10 @@ If `GITHUB_TOKEN` is set it is used as-is and the `GITHUB_APP_*` vars are ignore
 | `RUNNER_CPUS` | no | `2` | CPU limit per runner container |
 | `RUNNER_KANIKO_SIZE` | no | `5g` | tmpfs size for `/kaniko` inside runner — used as Buildah's `graphRoot` (image layer storage) and Kaniko scratch space |
 | `RUNNER_APPARMOR_PROFILE` | no | `infra-runner` | AppArmor profile name; empty to disable |
-| `RUNNER_SECCOMP_HOST_PATH` | no | — | Absolute **host** path to `seccomp/runner-profile.json`; Docker daemon resolves it on the host, not inside any container |
+| `RUNNER_SECCOMP_HOST_PATH` | no | — | Path to `seccomp/runner-profile.json` **inside the controller**. The docker CLI reads the file client-side and sends its contents to the daemon; compose mounts the repo's profile at `/home/ghrunner/infra-runner/seccomp/runner-profile.json`, which is why the usual value looks like a host path |
+| `RUNNER_SUBNET_PREFIX` | no | `10.89` | Job networks get explicit /24s from `<prefix>.0.0/16`; keep in sync with `RUNNER_SUBNET` of `setup-egress-policy.sh` |
+| `GITHUB_APP_PRIVATE_KEY_HOST_PATH` | no | `/home/ghrunner/.ssh/github-app.pem` | Host path of the App key, mounted into the controller |
+| `HEALTH_BIND` | no | `0.0.0.0` | Host address `HEALTH_PORT` is published on (`127.0.0.1` = local only) |
 | `COMPOSE_PROJECT_NAME` | yes | `infra-runner` | Must match the server directory name |
 | `POLL_INTERVAL` | no | `60` | Deployer digest check interval (seconds) |
 | `HEALTH_PORT` | no | `8080` | Deployer health endpoint port |
@@ -149,8 +154,9 @@ passed to post-deploy hook scripts via the deployer's inherited environment.
 `RUNNER_IMAGE` and `DOCKER_HOST` are set in the Compose `environment` block (not `.env`)
 and must not be overridden there.
 
-`RUNNER_SECCOMP_HOST_PATH` must be a path on the **host** filesystem because Docker daemon
-resolves it there. Leave empty to fall back to Docker's default seccomp profile.
+`RUNNER_SECCOMP_HOST_PATH` is read by the docker CLI **inside the controller** (it uploads the
+profile's contents), so it must point at the compose-mounted copy. Leave empty to fall back to
+Docker's default seccomp profile.
 
 ---
 
@@ -162,12 +168,15 @@ resolves it there. Leave empty to fall back to Docker's default seccomp profile.
 - **Docker CLI**: `docker-ce-cli` only — no daemon. Used for `docker login` (writes registry
   credentials to `~/.docker/config.json`). `docker build`/`run`/`push` have no daemon to reach.
 - **Buildah + fuse-overlayfs**: primary daemonless image builder. Installed via `apt-get`.
-  `/etc/containers/storage.conf` sets `driver=overlay`, `graphRoot=/kaniko`, and
-  `mount_program=/usr/bin/fuse-overlayfs`. Workflows call `buildah build` and `buildah push`.
-- **Kaniko**: `COPY --from=ghcr.io/kaniko-build/dist/chainguard-forks-kaniko/executor:v1.25.14 /kaniko/executor /usr/local/bin/kaniko`
+  `/etc/containers/storage.conf` sets `driver=overlay`, `graphroot=/kaniko`,
+  `runroot=/tmp/buildah-run` and `mount_program=/usr/bin/fuse-overlayfs`. Workflows call `buildah build` and `buildah push`.
+- **Kaniko**: `COPY --from=ghcr.io/kaniko-build/dist/chainguard-forks-kaniko/executor:v1.25.14@sha256:…`
   — kept for backward compat with existing workflows. Built from the Chainguard community fork
   of the original (Google archived on 2025-06-03); published by the `kaniko-build` org.
-  Version-pinned so Dependabot tracks updates.
+  Tag + digest pinned.
+- **Base images**: all three Dockerfiles use `ubuntu:24.04@sha256:…` (Dependabot bumps tag + digest).
+- **cosign / Vault CLIs**: downloaded by version and verified against a SHA256 pinned in the
+  Dockerfile (`COSIGN_SHA256`, `VAULT_SHA256`) — not against a checksum file from the same source.
 - **Runner binary**: downloaded from `github.com/actions/runner/releases`, SHA256-verified
   before extraction, then extracted to `/opt/actions-runner/`.
 - **User**: root — required by Buildah and Kaniko to extract image layers and execute `RUN`
@@ -384,9 +393,14 @@ See `deployer/PLUGINS.md` for the descriptor format and a worked example.
 **Socket proxies** (`controller-proxy`, `deployer-proxy`)
 - Image: `tecnativa/docker-socket-proxy@sha256:1f3a6...`
 - Each mounts `/var/run/docker.sock:ro` and exposes port `2375` on an internal network
-- Allowed API groups: `CONTAINERS`, `NETWORKS`, `IMAGES`, `AUTH`, `POST`, `DELETE`, `INFO`
+- Allowed API groups: `CONTAINERS`, `NETWORKS`, `IMAGES`, `POST`, `DELETE`, `INFO`
 - Deployer proxy additionally allows: `VOLUMES`
-- Disabled on both: `EXEC=0`, `BUILD=0`, `PLUGINS=0`, `SYSTEM=0`, `SWARM=0`, `SECRETS=0`
+- Disabled on both: `AUTH=0` (credentials travel per request, `/auth` is never called),
+  `EXEC=0`, `BUILD=0`, `PLUGINS=0`, `SYSTEM=0`, `SWARM=0`, `SECRETS=0`
+- The proxy filters API **paths**, not request bodies: `CONTAINERS`+`POST` still lets the client
+  create a privileged container with host mounts. Controller and deployer are therefore
+  host-root-equivalent; the proxy reduces the surface, it is not a sandbox.
+- `security_opt: no-new-privileges`, `logging` capped (json-file 10 MB × 3)
 - Resource limits: `memory: 128m`, `cpus: 0.25` — prevents a runaway proxy from affecting the host
 - `restart: unless-stopped`
 
@@ -395,8 +409,14 @@ See `deployer/PLUGINS.md` for the descriptor format and a worked example.
 - `depends_on: controller-proxy`
 - `restart: unless-stopped`
 - `tmpfs: /root/.docker` — GHCR credentials written here (ephemeral, never touches overlay fs)
-- `volumes: ./seccomp/runner-profile.json:/home/ghrunner/infra-runner/seccomp/runner-profile.json:ro`
-- `healthcheck`: `docker ps --filter label=runner-managed=true` every 30s
+- **No `env_file`**: an explicit `environment:` allowlist interpolated from `.env`, so secrets
+  meant for plugin hooks (e.g. `VAULT_TOKEN`) never reach the controller.
+  `RUNNER_APPARMOR_PROFILE: ${RUNNER_APPARMOR_PROFILE-infra-runner}` uses `-` so an explicitly
+  empty value disables AppArmor
+- `volumes`: `seccomp/runner-profile.json` at the same path inside the container (the docker CLI
+  reads the profile file client-side) and the App key from `GITHUB_APP_PRIVATE_KEY_HOST_PATH`
+- `cap_drop: ALL`, `no-new-privileges`, logging capped; `stop_grace_period: 60s`
+- `healthcheck`: heartbeat file younger than 5 min
 
 **deployer service**
 - Connects via `DOCKER_HOST=tcp://deployer-proxy:2375` — no direct socket mount
@@ -404,20 +424,26 @@ See `deployer/PLUGINS.md` for the descriptor format and a worked example.
   the deployer after cosign verification (controller likewise; `RUNNER_IMAGE` is `:verified`)
 - Mounts `${COMPOSE_PROJECT_DIR}:/workspace:ro` for `docker compose up` (reads compose file + `.env`);
   no GitHub App key (the deployer does not need one)
-- Exposes `HEALTH_PORT` for the health endpoint
+- Publishes `HEALTH_PORT` on `HEALTH_BIND` (default `0.0.0.0`; `127.0.0.1` keeps it local —
+  Docker-published ports bypass ufw)
+- `cap_drop: ALL`, `no-new-privileges`, logging capped
+- Self-update helper mounts only the project dir and the directories of the `COMPOSE_FILE`
+  entries (read-only, at their host paths) — not the whole home directory
 - `depends_on: deployer-proxy`
 - `restart: unless-stopped`
 - `tmpfs: /root/.docker` — GHCR credentials written here (ephemeral, never touches overlay fs)
 - `healthcheck`: `GET /health` every 30s (`start_period: 120s`). Docker only marks the
   container unhealthy — it does **not** restart it; alert on `/health` externally
 
-**Networks** (all within 172.20.0.0/24, outside the 10.89.0.0/16 runner pool):
+**Networks** (fixed subnets in 172.20.0.0/16, outside the 10.89.0.0/16 runner range):
 - `controller-proxy-net`: 172.20.0.0/26 — controller-proxy ↔ controller only
 - `controller-net`: 172.20.0.64/26 — controller egress (internet, GitHub API)
 - `deployer-proxy-net`: 172.20.128.0/26 — deployer-proxy ↔ deployer only
 - `deployer-net`: 172.20.128.64/26 — deployer egress (internet, GHCR)
 
-**No named volumes** — the controller creates no volumes in the current architecture.
+**No named volumes** — runners use tmpfs only. Per-job networks are created by the controller
+with an explicit `--subnet` `<RUNNER_SUBNET_PREFIX>.<n>.0/24` (third octet derived from the job
+id, moved on overlap), so only runner networks fall into the egress-restricted range.
 
 **Plugin overlays** — external projects ship their own `docker-compose.infra-runner.yml` that
 extends the deployer service with the mounts their plugin needs (the `*.plugin` descriptor file
@@ -472,7 +498,6 @@ sudo usermod -aG docker ghrunner
 
 # 2. Run one-time setup scripts (as root)
 sudo bash ~/infra-runner/scripts/setup-egress-policy.sh
-sudo systemctl restart docker   # activates the Docker address pool change
 sudo bash ~/infra-runner/scripts/setup-apparmor.sh
 # Verify: aa-status | grep infra-runner
 
@@ -589,9 +614,11 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
   the container filesystem, the container is destroyed before any subsequent job runs.
 - **Docker socket proxies** (`tecnativa/docker-socket-proxy@sha256:1f3a6...`) sit between each service
   and `/var/run/docker.sock`. Controller and deployer connect via `DOCKER_HOST=tcp://proxy:2375`.
-  `EXEC` and `BUILD` are disabled on both proxies — these are the primary escape vectors.
-  The proxy containers themselves still mount the raw socket (unavoidable); they are minimal,
-  versioned, and tracked by Dependabot.
+  `EXEC`, `BUILD` and `AUTH` are disabled. The proxy filters by API path, not by request
+  body, so container creation with `--privileged` or host mounts remains possible — treat a
+  compromised controller/deployer as root on the host. Both run with `cap_drop: ALL` and
+  `no-new-privileges`. The proxy containers themselves mount the raw socket (unavoidable);
+  they are minimal, digest-pinned, and tracked by Dependabot.
 - **Seccomp** blocks kernel-level syscalls (`kexec_*`, `bpf`, kernel modules, `pivot_root`)
   that are the basis of most container escape techniques. `mount`/`umount2` are intentionally
   re-opened to support fuse-overlayfs; the AppArmor profile compensates by restricting
@@ -612,9 +639,11 @@ The `GITHUB_TOKEN` used in the CI workflow (built-in) only needs `packages: writ
   Dependabot tracks version bumps and sends PRs.
 - **Resource limits** prevent crypto mining or denial-of-service against the host. Socket proxy
   containers are additionally limited to `memory: 128m` / `cpus: 0.25`.
-- **Network egress is restricted.** `scripts/setup-egress-policy.sh` allocates job networks
-  from `10.89.0.0/16` and adds iptables `DOCKER-USER` rules allowing only DNS (53) and
-  HTTPS (443) from that subnet. Private RFC 1918 ranges are explicitly blocked.
+- **Network egress is restricted.** Job networks get explicit subnets from `10.89.0.0/16`.
+  `scripts/setup-egress-policy.sh` installs chain `INFRA-RUNNER-FWD` (from `DOCKER-USER`):
+  only DNS (53) and HTTPS (443) to the internet; RFC 1918, link-local/metadata and CGNAT
+  ranges dropped; and `INFRA-RUNNER-IN` (from `INPUT`): runners cannot reach the host's own
+  services (sshd, published ports), except DNS. IPv6 is not covered (Docker's default).
 - **Image signatures.** CI signs all three images (runner, controller, deployer) with cosign
   keyless signing tied to the workflow's GitHub Actions OIDC identity. The deployer
   cosign-verifies the remote tag, pulls **the exact digest cosign verified**, and only then tags

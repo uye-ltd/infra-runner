@@ -240,14 +240,37 @@ interruptible_sleep() {
 # 1. Deployer self-update — delegated to an external sibling helper container
 # ---------------------------------------------------------------------------
 # The helper runs `docker compose up -d --no-deps deployer` from OUTSIDE our lifecycle.
-# It mounts the project's PARENT at its real path and runs with -w <project dir>, so
-# compose reads COMPOSE_FILE from the project .env and resolves both its relative entries
-# (relative to the working directory, not --project-directory) and sibling plugin
-# overlays like ../infra-vault/docker-compose.infra-runner.yml. Arguments are passed as
-# argv — nothing is interpolated into a shell string.
+# It runs with -w <project dir> and mounts, read-only at their real host paths, the
+# project dir plus the directory of every COMPOSE_FILE entry. Compose then reads
+# COMPOSE_FILE from the project .env and resolves its relative entries (relative to the
+# working directory, not --project-directory), including sibling plugin overlays like
+# ../infra-vault/docker-compose.infra-runner.yml — without exposing the rest of the
+# home directory (e.g. ~/.ssh). Arguments are passed as argv, never as a shell string.
+
+# helper_mounts → _mounts (-v args)
+helper_mounts() {
+  local -A seen=()
+  local entry dir
+  _mounts=()
+  local IFS="${COMPOSE_PATH_SEPARATOR:-:}"
+  for entry in ${COMPOSE_FILE:-} .; do
+    [[ -n "${entry}" ]] || continue
+    [[ "${entry}" == /* ]] || entry="${COMPOSE_PROJECT_DIR}/${entry}"
+    if [[ "${entry}" == . || "${entry}" == "${COMPOSE_PROJECT_DIR}/." ]]; then
+      dir="${COMPOSE_PROJECT_DIR}"
+    else
+      dir="$(dirname "${entry}")"
+    fi
+    dir="$(realpath -m "${dir}")"
+    [[ -z "${seen[${dir}]:-}" ]] || continue
+    seen[${dir}]=1
+    _mounts+=(-v "${dir}:${dir}:ro")
+  done
+}
+
 self_update() {
   local proxy_net="${COMPOSE_PROJECT_NAME}_deployer-proxy-net"
-  local parent_dir; parent_dir="$(dirname "${COMPOSE_PROJECT_DIR}")"
+  helper_mounts
 
   docker rm -f "${HELPER_NAME}" > /dev/null 2>&1 || true
   log info "Launching self-update helper" name "${HELPER_NAME}"
@@ -256,7 +279,7 @@ self_update() {
        --network "${proxy_net}" \
        -e DOCKER_HOST=tcp://deployer-proxy:2375 \
        -e COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME}" \
-       -v "${parent_dir}:${parent_dir}:ro" \
+       "${_mounts[@]}" \
        -w "${COMPOSE_PROJECT_DIR}" \
        --label infra-runner.role=deployer-selfupdate \
        --entrypoint docker \

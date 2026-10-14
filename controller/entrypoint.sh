@@ -28,8 +28,13 @@ RUNNER_MEMORY="${RUNNER_MEMORY:-4g}"
 RUNNER_CPUS="${RUNNER_CPUS:-2}"
 RUNNER_PIDS_LIMIT="${RUNNER_PIDS_LIMIT:-4096}"
 RUNNER_KANIKO_SIZE="${RUNNER_KANIKO_SIZE:-5g}"
-RUNNER_APPARMOR_PROFILE="${RUNNER_APPARMOR_PROFILE:-infra-runner}"
+# `-` not `:-`: unset → default profile, explicitly empty → AppArmor disabled (as documented).
+RUNNER_APPARMOR_PROFILE="${RUNNER_APPARMOR_PROFILE-infra-runner}"
 RUNNER_SECCOMP_HOST_PATH="${RUNNER_SECCOMP_HOST_PATH:-}"
+# Per-job /24 networks are carved from <prefix>.0.0/16 with an EXPLICIT --subnet, so only
+# runner networks land in the range that setup-egress-policy.sh restricts (Docker's
+# default-address-pools would also hand it to every other network on the host).
+RUNNER_SUBNET_PREFIX="${RUNNER_SUBNET_PREFIX:-10.89}"
 # jit   — single-use JIT config (default). Nothing reusable ever enters the runner.
 # token — legacy registration token (reusable for 1 h by anyone who reads it).
 RUNNER_REGISTRATION_MODE="${RUNNER_REGISTRATION_MODE:-jit}"
@@ -54,6 +59,7 @@ for _v in DESIRED_IDLE MAX_RUNNERS RUNNER_PIDS_LIMIT RUNNER_GROUP_ID CONTROLLER_
 done
 case "${RUNNER_REGISTRATION_MODE}" in jit|token) ;; *) die "RUNNER_REGISTRATION_MODE must be jit or token";; esac
 case "${SHUTDOWN_CLEANUP}" in idle|all|none) ;; *) die "SHUTDOWN_CLEANUP must be idle, all or none";; esac
+[[ "${RUNNER_SUBNET_PREFIX}" =~ ^[0-9]{1,3}\.[0-9]{1,3}$ ]] || die "RUNNER_SUBNET_PREFIX must look like 10.89"
 
 # ---------------------------------------------------------------------------
 # Authentication — GitHub App (preferred) or static PAT (backward compat)
@@ -256,6 +262,26 @@ remove_running_runners() {
 # Spawning
 # ---------------------------------------------------------------------------
 
+# create_runner_network NAME JOB_ID — bridge network with an explicit /24 from
+# RUNNER_SUBNET_PREFIX. The third octet is derived from the (random) job id and moved on
+# when Docker reports an overlap with an existing network.
+create_runner_network() {
+  local net_name="$1" job_id="$2" attempt octet err
+  local base=$(( 16#${job_id:0:2} ))
+  for (( attempt = 0; attempt < 16; attempt++ )); do
+    octet=$(( (base + attempt * 17) % 256 ))
+    if err=$(docker network create --driver bridge \
+               --subnet "${RUNNER_SUBNET_PREFIX}.${octet}.0/24" \
+               --label runner-managed=true --label "runner-job-id=${job_id}" \
+               "${net_name}" 2>&1 > /dev/null); then
+      return 0
+    fi
+    grep -qiE 'overlap|in use|already' <<< "${err}" || break
+  done
+  log error "Failed to create runner network" job_id "${job_id}" detail "${err}"
+  return 1
+}
+
 # Labels as a JSON array: trimmed, empty entries dropped.
 labels_json() {
   jq -nc --arg l "${RUNNER_LABELS}" \
@@ -271,12 +297,7 @@ spawn_runner() {
 
   log info "Spawning runner" job_id "${job_id}" mode "${RUNNER_REGISTRATION_MODE}"
 
-  if ! docker network create --driver bridge \
-       --label runner-managed=true --label "runner-job-id=${job_id}" \
-       "${net_name}" > /dev/null; then
-    log error "Failed to create runner network" job_id "${job_id}"
-    return 1
-  fi
+  create_runner_network "${net_name}" "${job_id}" || return 1
 
   local reg_env=() gh_id=""
   if [[ "${RUNNER_REGISTRATION_MODE}" == jit ]]; then
@@ -325,6 +346,7 @@ spawn_runner() {
        --memory="${RUNNER_MEMORY}" \
        --cpus="${RUNNER_CPUS}" \
        --pids-limit="${RUNNER_PIDS_LIMIT}" \
+       --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 \
        --cap-add CHOWN \
        --cap-add DAC_OVERRIDE \
        --cap-add FOWNER \
