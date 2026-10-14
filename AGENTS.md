@@ -245,7 +245,10 @@ Main loop (every CONTROLLER_POLL_INTERVAL seconds, default 15) — reconcile():
      cleanup_orphan_networks(). Removal/API failures make the cycle unsuccessful and are retried.
   7. load_org_runners()            ← GET /orgs/{org}/actions/runners → busy flag per runner-job-* name
                                       (API down/malformed page → cycle fails; running jobs remain untouched)
-  8. needed = min(DESIRED_IDLE - idle, MAX_RUNNERS - total); spawn in parallel and wait.
+  8. Only a GitHub runner explicitly marked not busy counts as idle; the registration
+     ID must also match when the container has a JIT ID label. Absent or mismatched
+     registrations still count toward total. Then needed =
+     min(DESIRED_IDLE - idle, MAX_RUNNERS - total); spawn in parallel and wait.
      Spawn failure → exponential backoff (poll interval × 2^n, max 300 s).
   9. touch /tmp/heartbeat on a successful cycle (compose healthcheck: stale > 5 min = unhealthy)
   sleep is interruptible (`sleep & wait`) so SIGTERM is handled immediately.
@@ -281,8 +284,9 @@ cleanup_job(job_id [gh_id]):
   DELETE /orgs/{org}/actions/runners/{gh_id}  (404 = already gone, ignored)
 
 shutdown() (SIGTERM/SIGINT), per SHUTDOWN_CLEANUP:
-  idle (default) → remove runners GitHub reports as not busy; busy ones finish and are
-                   cleaned up by the next controller. API down → leave everything.
+  idle (default) → remove runners GitHub reports as not busy (and whose JIT ID matches);
+                   busy, absent and mismatched registrations remain for the next controller.
+                   API down → leave everything.
   all            → remove every runner (interrupts jobs).   none → leave everything.
 ```
 

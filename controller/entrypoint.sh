@@ -190,6 +190,15 @@ load_org_runners() {
   return 0
 }
 
+# A local runner is idle only when GitHub explicitly reports it as idle. An
+# absent record may still be registering; a different ID may belong to another
+# registration with the same name. Token-mode runners have no local ID label.
+runner_idle_in_github() {
+  local name="$1" gh_id="$2"
+  [[ "${_GH_BUSY[${name}]:-}" == false ]] || return 1
+  [[ -z "${gh_id}" || "${_GH_ID[${name}]:-}" == "${gh_id}" ]]
+}
+
 # Idempotent: 404 (already removed — e.g. ephemeral runner after its job) is fine.
 deregister_runner() {
   local gh_id="$1"
@@ -296,8 +305,8 @@ remove_running_runners() {
   fi
   while IFS='|' read -r name job_id gh_id; do
     [[ -n "${name}" ]] || continue
-    if [[ "${mode}" == idle && "${_GH_BUSY[${name}]:-false}" == true ]]; then
-      log info "Leaving busy runner to finish its job" job_id "${job_id}"
+    if [[ "${mode}" == idle ]] && ! runner_idle_in_github "${name}" "${gh_id}"; then
+      log info "Leaving runner without a matching idle GitHub record" job_id "${job_id}" name "${name}"
       continue
     fi
     [[ -n "${gh_id}" ]] || gh_id="${_GH_ID[${name}]:-}"
@@ -489,8 +498,9 @@ reconcile() {
   while IFS='|' read -r name job_id gh_id; do
     [[ -n "${name}" ]] || continue
     total=$(( total + 1 ))
-    # A runner not (yet) listed by GitHub is still registering → counts as idle.
-    [[ "${_GH_BUSY[${name}]:-false}" == true ]] || idle=$(( idle + 1 ))
+    # Unknown or mismatched registrations count toward the container cap, but
+    # cannot satisfy the desired idle count until GitHub confirms them.
+    runner_idle_in_github "${name}" "${gh_id}" && idle=$(( idle + 1 ))
   done <<< "${running}"
   local needed=$(( DESIRED_IDLE - idle ))
   local room=$(( MAX_RUNNERS - total ))

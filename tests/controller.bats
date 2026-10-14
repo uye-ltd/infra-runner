@@ -76,6 +76,25 @@ calls()      { cat "${CALLS}"; }
   refute grep -q '^docker run' "${CALLS}"
 }
 
+@test "running runner absent from GitHub does not satisfy desired idle capacity" {
+  running 'runner-job-a|a|1'
+  gh_runners ''
+  DESIRED_IDLE=1; MAX_RUNNERS=2
+  reconcile_rc
+  [ "${rc}" -eq 0 ]
+  [ "$(grep -c '^docker run' "${CALLS}")" -eq 1 ]
+  refute grep -q 'docker rm -f runner-job-a' "${CALLS}"
+}
+
+@test "running runner with a mismatched GitHub ID does not satisfy idle capacity" {
+  running 'runner-job-a|a|1'
+  gh_runners '{"name":"runner-job-a","busy":false,"id":2}'
+  DESIRED_IDLE=1; MAX_RUNNERS=2
+  reconcile_rc
+  [ "${rc}" -eq 0 ]
+  [ "$(grep -c '^docker run' "${CALLS}")" -eq 1 ]
+}
+
 @test "exited runner is removed and deregistered (404 tolerated)" {
   gh_runners ''
   touch "${ST}/no_image"
@@ -221,6 +240,17 @@ calls()      { cat "${CALLS}"; }
   remove_running_runners idle > /dev/null
   grep -q 'rm -f runner-job-a' "${CALLS}"
   refute grep -q 'rm -f runner-job-b' "${CALLS}"
+}
+
+@test "shutdown in idle mode preserves runners absent from GitHub or with another ID" {
+  running 'runner-job-a|a|1' 'runner-job-b|b|2' 'runner-job-c|c|3'
+  gh_runners '{"name":"runner-job-b","busy":false,"id":9},{"name":"runner-job-c","busy":false,"id":3}'
+  remove_running_runners idle > /dev/null
+  refute grep -q 'rm -f runner-job-a' "${CALLS}"
+  refute grep -q 'rm -f runner-job-b' "${CALLS}"
+  grep -q 'rm -f runner-job-c' "${CALLS}"
+  refute grep -q 'actions/runners/1$' "${CALLS}"
+  refute grep -q 'actions/runners/2$' "${CALLS}"
 }
 
 @test "shutdown all removes containers even when GitHub deregistration fails" {
