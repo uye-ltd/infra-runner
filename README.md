@@ -330,7 +330,7 @@ only what each workflow needs and set the org-level default to read-only:
 push to main
   → CI builds images on GitHub-hosted runners (ubuntu-latest)
   → CI pushes each image to GHCR by :sha tag
-  → CI signs and scans the digest, then promotes that same digest to :latest
+  → CI signs and scans all three digests, then promotes their verified :sha tags to :latest
   → deployer, every POLL_INTERVAL seconds (default 60s), for each image:
       cosign verify :latest → pull exactly the verified digest → tag it :verified (+ :latest)
       → deployer image ≠ running?   → self-update via helper container
@@ -349,6 +349,10 @@ image with `:verified` every cycle, a failed `compose up` or self-update is retr
 cycle, including after a deployer restart. The deployer confirms that the service is running
 on the verified image before reporting success. A failed blocking plugin hook is retried
 each cycle while the deployer stays up; its pending state is lost on deployer restart.
+Promotion starts only when all three images pass their build, signature and CRITICAL scan.
+The three registry tag updates are sequential, so a registry failure during promotion can
+still leave a partially updated set until the workflow is rerun.
+The promotion gate is in `scripts/promote-images.sh` and is covered by local stub tests.
 
 **Upgrading a server from the tag-pull deployer:** no action is needed before `git pull` — the
 old deployer self-updates and the new one tags all images `:verified` on its first cycle. After

@@ -37,6 +37,7 @@ no SSH push from CI is required.
 │   ├── ghcr-login.sh                 # refresh GHCR credentials on the host (sources github-app-token.sh)
 │   ├── github-app-token.sh           # GitHub App JWT helper (sourced by controller + ghcr-login.sh): RS256 JWT → installation token
 │   ├── logging.sh                    # shared structured JSON log() function (sourced by controller + deployer)
+│   ├── promote-images.sh             # verify all :sha candidates, then promote signed digests to :latest
 │   ├── setup-apparmor.sh             # one-time: install + load AppArmor profile
 │   └── setup-egress-policy.sh        # one-time, idempotent: iptables chains INFRA-RUNNER-FWD/-IN for the runner range
 ├── seccomp/
@@ -46,8 +47,9 @@ no SSH push from CI is required.
 │   ├── Dockerfile                    # test env: ubuntu + bats + jq + python3
 │   ├── controller.bats               # controller reconcile logic vs stubbed docker / GitHub API
 │   ├── deployer.bats                 # deployer reconcile + plugin logic vs stubbed docker / cosign
+│   ├── promote-images.bats           # release promotion gate vs stubbed cosign / Docker
 │   ├── test_health_server.py         # health server (stdlib unittest)
-│   └── stubs/{controller,deployer}/  # fake docker, cosign, curl, uuidgen (state in files)
+│   └── stubs/{controller,deployer,promotion}/  # fake docker, cosign, curl, uuidgen
 ├── .hadolint.yaml
 └── .github/
     ├── dependabot.yml                # weekly PRs: Dockerfiles, docker-compose.yml, Actions
@@ -490,11 +492,16 @@ push to main → job publish (contents: read, packages: write, id-token: write)
                  checkout → cosign-installer (v2.2.4) → login ghcr.io
                  → build + push ghcr.io/{owner}/{image}:sha
                  → cosign sign --yes {image}@{digest}   (keyless; auth from the login step)
-                 → trivy scan → promote the same digest to :latest
+                 → trivy scan
+             → job promote (needs all publish matrix jobs to succeed)
+                 → cosign-verify all three :sha tags → promote signed digests to :latest
 ```
 
 - `concurrency`: publishes are serialised (`cancel-in-progress: false`), so an older build can
   never finish last and move `:latest` backwards; PR builds of the same ref cancel each other.
+- No `:latest` tag moves if any image fails its build, signing or CRITICAL scan. Promotion
+  across three separate registry tags is sequential, so a registry error during promotion
+  can still leave a partially updated set of tags.
 - Trivy reports fixable HIGH findings and blocks on fixable CRITICAL findings; reviewed,
   expiring exceptions live in `.trivyignore.yaml`.
 - `${{ }}` expressions are passed to `run:` via `env:` only (no template injection — zizmor).
