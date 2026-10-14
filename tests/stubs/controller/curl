@@ -5,6 +5,18 @@ echo "curl $*" >> "${CALLS}"
 url="${*: -1}"
 [[ -f "${ST}/api_fail" ]] && { printf 'err\n500'; exit 0; }
 case "${url}" in
+  *app/installations/*/access_tokens)
+    if [[ -f "${ST}/app_token_bad" ]]; then
+      printf '{"token":42}'
+    else
+      printf '{"token":"ghs_testtoken"}'
+    fi ;;
+  *registration-token)
+    if [[ -f "${ST}/registration_token_bad" ]]; then
+      printf '{"token":42}\n201'
+    else
+      printf '{"token":"REGXYZ"}\n201'
+    fi ;;
   *"actions/runners?per_page"*)
     page="${url##*page=}"
     [[ -f "${ST}/api_fail_page_${page}" ]] && { printf 'err\n500'; exit 0; }

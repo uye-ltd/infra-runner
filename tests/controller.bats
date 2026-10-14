@@ -60,6 +60,68 @@ calls()      { cat "${CALLS}"; }
   refute grep -q '^docker run' "${CALLS}"
 }
 
+@test "GitHub App token must be a nonempty string" {
+  source "${BATS_TEST_DIRNAME}/../scripts/github-app-token.sh"
+  _make_jwt() { printf 'fake.jwt'; }
+  GITHUB_APP_ID=123 GITHUB_APP_INSTALLATION_ID=456 GITHUB_APP_PRIVATE_KEY_PATH=/unused
+  [ "$(generate_installation_token)" = ghs_testtoken ]
+  touch "${ST}/app_token_bad"
+  if generate_installation_token > /dev/null; then
+    echo 'Malformed GitHub App token was accepted' >&2
+    return 1
+  fi
+}
+
+@test "GitHub App JWT has a valid RS256 signature and short lifetime" {
+  source "${BATS_TEST_DIRNAME}/../scripts/github-app-token.sh"
+  local key="${BATS_TEST_TMPDIR}/app.pem" jwt
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "${key}" > /dev/null 2>&1
+  jwt=$(_make_jwt 123 "${key}")
+  python3 - "${jwt}" "${BATS_TEST_TMPDIR}" <<'PY'
+import base64
+import json
+from pathlib import Path
+import sys
+import time
+
+header, payload, signature = sys.argv[1].split('.')
+decode = lambda part: base64.urlsafe_b64decode(part + '=' * (-len(part) % 4))
+assert json.loads(decode(header)) == {'alg': 'RS256', 'typ': 'JWT'}
+claims = json.loads(decode(payload))
+now = time.time()
+assert claims['iss'] == '123'
+assert now - 120 <= claims['iat'] <= now
+assert now < claims['exp'] <= now + 600
+assert claims['exp'] - claims['iat'] == 600
+Path(sys.argv[2], 'signed').write_bytes(f'{header}.{payload}'.encode())
+Path(sys.argv[2], 'signature').write_bytes(decode(signature))
+PY
+  openssl pkey -in "${key}" -pubout -out "${BATS_TEST_TMPDIR}/app.pub" > /dev/null 2>&1
+  openssl dgst -sha256 -verify "${BATS_TEST_TMPDIR}/app.pub" \
+    -signature "${BATS_TEST_TMPDIR}/signature" "${BATS_TEST_TMPDIR}/signed" \
+    | grep -Fxq 'Verified OK'
+}
+
+@test "legacy registration token must be a nonempty string" {
+  RUNNER_REGISTRATION_MODE=token
+  gh_runners ''
+  touch "${ST}/registration_token_bad"
+  reconcile_rc
+  [ "${rc}" -eq 1 ]
+  refute grep -q '^docker run' "${CALLS}"
+  grep -q '^docker network rm' "${CALLS}"
+}
+
+@test "valid legacy registration token starts an ephemeral runner" {
+  RUNNER_REGISTRATION_MODE=token
+  DESIRED_IDLE=1; MAX_RUNNERS=1
+  gh_runners ''
+  reconcile_rc
+  [ "${rc}" -eq 0 ]
+  grep -q 'RUNNER_REGISTRATION_TOKEN=REGXYZ' "${CALLS}"
+  refute grep -q 'RUNNER_JITCONFIG=' "${CALLS}"
+}
+
 @test "a failed later GitHub page prevents spawning from a partial busy map" {
   jq -nc '{runners: [range(100) | {name: ("runner-job-" + tostring), busy: false, id: .}]}' \
     > "${ST}/gh_runners_page_1"

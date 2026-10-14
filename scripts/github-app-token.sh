@@ -37,8 +37,7 @@ generate_installation_token() {
     -H "Authorization: Bearer ${jwt}" \
     -H "Accept: application/vnd.github+json" \
     "https://api.github.com/app/installations/${GITHUB_APP_INSTALLATION_ID}/access_tokens" \
-    | jq -r '.token // empty')
+    | jq -er '.token | select(type == "string" and length > 0)') || return 1
 
-  [[ -n "${token}" ]] || return 1
   printf '%s' "${token}"
 }

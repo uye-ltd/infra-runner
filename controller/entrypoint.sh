@@ -202,7 +202,7 @@ deregister_runner() {
 fetch_registration_token() {
   local resp
   resp=$(gh_api POST "/orgs/${GITHUB_ORG}/actions/runners/registration-token") || return 1
-  jq -r '.token // empty' <<< "${resp}"
+  jq -er '.token | select(type == "string" and length > 0)' <<< "${resp}"
 }
 
 # ---------------------------------------------------------------------------

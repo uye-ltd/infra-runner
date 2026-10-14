@@ -235,7 +235,8 @@ Startup:
   1. Validate env vars.
      Auth path A (preferred): GITHUB_APP_ID + GITHUB_APP_INSTALLATION_ID + GITHUB_APP_PRIVATE_KEY_PATH
        → source scripts/github-app-token.sh
-       → acquire_github_token(): RS256 JWT → POST /app/installations/{id}/access_tokens → GITHUB_TOKEN
+       → acquire_github_token(): RS256 JWT → POST /app/installations/{id}/access_tokens
+         → validate nonempty string token → GITHUB_TOKEN
      Auth path B (fallback): GITHUB_TOKEN set directly → used as-is, App flow skipped
   2. No GHCR login or image pull: the deployer maintains the local :verified runner image,
      and `docker run --pull never` uses that image even with private packages.
@@ -272,6 +273,7 @@ spawn_runner():
                    → validate matching name, positive integer runner.id and non-empty
                      encoded_jit_config; store the ID as label runner-gh-id
      token mode: POST /orgs/{org}/actions/runners/registration-token
+                 → require a nonempty string token before starting a container
   d. docker run -d --pull never runner image → runner-job-{id}
        --network runner-net-{id}  --memory --cpus --pids-limit
        --cap-add CHOWN DAC_OVERRIDE FOWNER SETUID SETGID SYS_PTRACE SYS_ADMIN
