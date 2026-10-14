@@ -198,6 +198,9 @@ Docker's default seccomp profile.
 - **cosign / Vault CLIs**: copied from official version- and digest-pinned images.
 - **Runner binary**: downloaded from `github.com/actions/runner/releases`, SHA256-verified
   before extraction, then extracted to `/opt/actions-runner/`.
+  The unused npm bundled with the runner's Node20 runtime is removed; Node20 itself
+  remains available for JavaScript actions. Workflows needing npm install Node via
+  `actions/setup-node`.
 - **User**: root — required by Buildah and Kaniko to extract image layers and execute `RUN`
   instructions. Container-level controls (seccomp, AppArmor, resource limits, no Docker socket,
   ephemeral) are the security boundary. The controller adds `CHOWN`, `DAC_OVERRIDE`, `FOWNER`,

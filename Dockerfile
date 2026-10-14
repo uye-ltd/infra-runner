@@ -53,12 +53,15 @@ COPY --from=ghcr.io/sigstore/cosign/cosign:v3.1.3@sha256:9e5c2f2edc34351160407ca
 
 WORKDIR /opt/actions-runner
 
-# Download, verify SHA256, and extract GitHub Actions runner binary
+# Download, verify SHA256, and extract GitHub Actions runner binary.
+# Node20 executes JavaScript actions, but its bundled npm is unused here and
+# still carries vulnerable node-tar 6.2.1. Remove npm without removing Node20.
 RUN curl -fsSL \
       "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz" \
       -o runner.tar.gz \
     && echo "${RUNNER_SHA256}  runner.tar.gz" | sha256sum -c - \
     && tar -xzf runner.tar.gz \
+    && rm -rf externals/node20/lib/node_modules/npm \
     && rm runner.tar.gz
 
 # Install runner .NET dependencies
