@@ -158,6 +158,63 @@ calls()      { cat "${CALLS}"; }
   refute grep -q '^docker run' "${CALLS}"
 }
 
+@test "malformed JIT response cannot start an untraceable runner" {
+  gh_runners ''
+  touch "${ST}/jit_missing_id"
+  reconcile_rc
+  [ "${rc}" -eq 1 ]
+  refute grep -q '^docker run' "${CALLS}"
+  grep -q '^docker network rm' "${CALLS}"
+}
+
+@test "partial JIT response recovers runner ID by its exact generated name" {
+  gh_runners '{"name":"runner-job-aabbccddee","busy":false,"id":88}'
+  touch "${ST}/jit_missing_id"
+  DESIRED_IDLE=1; MAX_RUNNERS=1
+  reconcile_rc
+  [ "${rc}" -eq 1 ]
+  refute grep -q '^docker run' "${CALLS}"
+  grep -q 'actions/runners/88$' "${CALLS}"
+}
+
+@test "missing JIT config deregisters the runner ID from the partial response" {
+  gh_runners ''
+  touch "${ST}/jit_bad_config"
+  reconcile_rc
+  [ "${rc}" -eq 1 ]
+  refute grep -q '^docker run' "${CALLS}"
+  grep -q 'actions/runners/77$' "${CALLS}"
+}
+
+@test "unexpected JIT runner name does not delete an unrelated runner ID" {
+  gh_runners ''
+  touch "${ST}/jit_wrong_name"
+  reconcile_rc
+  [ "${rc}" -eq 1 ]
+  refute grep -q '^docker run' "${CALLS}"
+  refute grep -q 'actions/runners/77$' "${CALLS}"
+}
+
+@test "runner exiting immediately is cleaned up and spawn backs off" {
+  gh_runners ''
+  touch "${ST}/run_exited"
+  reconcile_rc
+  [ "${rc}" -eq 1 ]
+  grep -q '^docker rm -f runner-job-' "${CALLS}"
+  grep -q 'actions/runners/77$' "${CALLS}"
+  (( _next_spawn_at > $(date +%s) ))
+}
+
+@test "startup inspection failure does not kill a potentially running job" {
+  gh_runners ''
+  touch "${ST}/inspect_fail"
+  reconcile_rc
+  [ "${rc}" -eq 1 ]
+  grep -q '^docker inspect runner-job-' "${CALLS}"
+  refute grep -q '^docker rm -f runner-job-' "${CALLS}"
+  refute grep -q 'actions/runners/77$' "${CALLS}"
+}
+
 @test "shutdown in idle mode removes idle runners and keeps busy ones" {
   running 'runner-job-a|a|1' 'runner-job-b|b|2'
   gh_runners '{"name":"runner-job-a","busy":false,"id":1},{"name":"runner-job-b","busy":true,"id":2}'

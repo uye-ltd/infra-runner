@@ -23,5 +23,9 @@ case "$1" in
     exit 0 ;;
   image) [[ -f "${ST}/no_image" ]] && exit 1; exit 0 ;;
   run)   [[ -f "${ST}/run_fail" ]] && exit 1; echo cid ;;
+  inspect)
+    [[ -f "${ST}/inspect_fail" ]] && exit 1
+    [[ -f "${ST}/run_exited" ]] && { echo false; exit 0; }
+    echo true ;;
   rm)    [[ -f "${ST}/rm_fail" ]] && exit 1; exit 0 ;;
 esac

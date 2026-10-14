@@ -361,13 +361,35 @@ spawn_runner() {
       cleanup_job "${job_id}"
       return 1
     fi
-    jit=$(jq -r '.encoded_jit_config // empty' <<< "${resp}")
-    gh_id=$(jq -r '.runner.id // empty' <<< "${resp}")
-    if [[ -z "${jit}" ]]; then
-      log error "JIT response missing encoded_jit_config" job_id "${job_id}"
+    # GitHub registers the runner before returning this response. Require the
+    # matching name and ID so cleanup has the correct runner to deregister.
+    if ! jq -e --arg name "${runner_ctr}" '
+      (.runner.name == $name) and
+      (.runner.id | type == "number") and
+      (.runner.id > 0) and
+      (.runner.id == (.runner.id | floor)) and
+      (.encoded_jit_config | type == "string") and
+      (.encoded_jit_config | length > 0)
+    ' <<< "${resp}" > /dev/null 2>&1; then
+      # A partial response may still contain a usable ID. Never delete an ID
+      # whose name does not match the one requested by this spawn.
+      gh_id=$(jq -r --arg name "${runner_ctr}" \
+        'select(.runner.name == $name) | .runner.id | numbers | select(. > 0 and . == floor)' \
+        <<< "${resp}" 2>/dev/null) || gh_id=""
+      if [[ -z "${gh_id}" ]]; then
+        # The registration may already exist even if its response was partial.
+        # Look up only the exact random name generated for this spawn.
+        if load_org_runners; then
+          gh_id="${_GH_ID[${runner_ctr}]:-}"
+        fi
+      fi
+      log error "Invalid JIT runner response" job_id "${job_id}"
+      [[ -n "${gh_id}" ]] || log warn "Cannot identify malformed JIT registration for deregistration" job_id "${job_id}"
       cleanup_job "${job_id}" "${gh_id}"
       return 1
     fi
+    jit=$(jq -r '.encoded_jit_config' <<< "${resp}")
+    gh_id=$(jq -r '.runner.id' <<< "${resp}")
     reg_env=(-e "RUNNER_JITCONFIG=${jit}")
   else
     local reg_token
@@ -416,6 +438,19 @@ spawn_runner() {
        -e RUNNER_ALLOW_RUNASROOT=1 \
        "${RUNNER_IMAGE}" > /dev/null; then
     log error "docker run failed for runner" job_id "${job_id}"
+    cleanup_job "${job_id}" "${gh_id}"
+    return 1
+  fi
+
+  local running
+  if ! running=$(docker inspect "${runner_ctr}" --format '{{.State.Running}}' 2>&1); then
+    # Docker may have started the container despite an inspect/API error. Leave it
+    # for the next reconcile rather than interrupt a job that could be running.
+    log warn "Cannot confirm runner startup" job_id "${job_id}" detail "${running}"
+    return 1
+  fi
+  if [[ "${running}" != true ]]; then
+    log error "Runner exited immediately after startup" job_id "${job_id}" state "${running}"
     cleanup_job "${job_id}" "${gh_id}"
     return 1
   fi

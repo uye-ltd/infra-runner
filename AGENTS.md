@@ -253,7 +253,8 @@ spawn_runner():
   b. docker network create runner-net-{id}  (bridge, labelled runner-managed=true)
   c. jit mode:   POST /orgs/{org}/actions/runners/generate-jitconfig
                    {name: runner-job-{id}, runner_group_id, labels, work_folder}
-                   → encoded_jit_config + runner.id (stored as label runner-gh-id)
+                   → validate matching name, positive integer runner.id and non-empty
+                     encoded_jit_config; store the ID as label runner-gh-id
      token mode: POST /orgs/{org}/actions/runners/registration-token
   d. docker run -d --pull never runner image → runner-job-{id}
        --network runner-net-{id}  --memory --cpus --pids-limit
@@ -266,7 +267,10 @@ spawn_runner():
        --tmpfs /root:rw,nosuid,size=512m      (docker login credentials, runner config)
        --tmpfs /kaniko:rw,nosuid,size=RUNNER_KANIKO_SIZE  (Buildah graphRoot + Kaniko scratch space)
        --device /dev/fuse                                (required by fuse-overlayfs)
-     Any failure → cleanup_job (incl. deregistering the JIT runner).
+     Inspect the resulting container to confirm it is running. An immediate exit is
+     cleaned up and backed off; an inspect/API failure leaves the container for the next
+     reconcile because a job may already be running.
+     Failed registration/run → cleanup_job (incl. deregistering the JIT runner).
   The runner entrypoint unsets the JIT config / registration token before `exec run.sh`,
   so job steps never inherit it.
 
