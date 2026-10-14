@@ -551,6 +551,8 @@ to `$CALLS`). The bootstrap tests run a copy of the standalone script against a 
   be exported **before** sourcing.
 - Global associative arrays are declared with `declare -gA` so the scripts also work when
   sourced from a function (bats `setup`).
+- `tests/deployer.bats` expands its readable two-character SHA fixture IDs to full 64-character
+  digests before cosign returns them; fake Docker image IDs remain compact.
 - `BATS_TEST_TIMEOUT=60` turns a hang into a failure.
 
 ---

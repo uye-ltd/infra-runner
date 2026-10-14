@@ -16,7 +16,9 @@ case "$1" in
   pull)
     ref="${*: -1}"
     [[ -f "${ST}/pull_fail" ]] && { echo "pull error" >&2; exit 1; }
-    echo "id-${ref##*@}" > "${ST}/img_$(k "${ref}")" ;;
+    digest="${ref##*@}"
+    # Compact fake IDs keep assertions readable; refs still use the full digest.
+    echo "id-sha256:${digest:7:2}" > "${ST}/img_$(k "${ref}")" ;;
   tag) cp "${ST}/img_$(k "$2")" "${ST}/img_$(k "$3")" ;;
   ps)
     svc=$(printf '%s\n' "$@" | sed -n 's/^label=com.docker.compose.service=//p')

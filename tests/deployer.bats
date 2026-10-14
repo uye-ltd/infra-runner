@@ -25,9 +25,19 @@ setup() {
   echo "ghcr.io/acme/infra-runner-controller:verified" > "${ST}/svcref_controller"
 }
 
-sig()     { echo "$2" > "${ST}/sig_${R}$1"; }        # sig <image name> <digest|BAD|NET>
+# Expand readable two-character fixture digests to the full format cosign emits.
+fixture_digest() {
+  local value="$1" suffix="${1#sha256:}"
+  if [[ "${value}" == sha256:* && "${suffix}" =~ ^[0-9a-f]{2}$ ]]; then
+    printf 'sha256:%s' "${suffix}"
+    printf '0%.0s' {1..62}
+  else
+    printf '%s' "${value}"
+  fi
+}
+sig()     { fixture_digest "$2" > "${ST}/sig_${R}$1"; } # sig <name> <digest|BAD|NET>
 running() { echo "$2" > "${ST}/ctr_$1"; }            # running <service> <image id>
-have()    { echo "id-$2" > "${ST}/img_${R}$1_$(tr ':' '_' <<< "$2")"; }  # have <name> <sha256:x>
+have()    { echo "id-$2" > "${ST}/img_${R}$1_$(fixture_digest "$2" | tr ':' '_')"; }
 verified(){ echo "$2" > "${ST}/img_${R}$1_verified"; }
 cycle()   { if run_cycle > /dev/null 2>&1; then :; fi; }
 hstatus() { jq -r .status "${HEALTH_FILE}"; }
@@ -49,7 +59,7 @@ hreason() { jq -r .reason "${HEALTH_FILE}"; }
 baseline() {
   sig uye-deployer sha256:d1; have uye-deployer sha256:d1; verified uye-deployer id-sha256:d1
   running deployer id-sha256:d1
-  sig infra-runner sha256:r1
+  sig infra-runner sha256:e1
 }
 
 @test "new controller digest: pulled by digest, tagged, controller recreated" {
@@ -58,11 +68,12 @@ baseline() {
   cycle
   grep -q 'docker pull --quiet ghcr.io/acme/infra-runner-controller@sha256:c2' "${CALLS}"
   refute grep -qE 'docker pull .*:latest' "${CALLS}"
-  grep -q 'tag ghcr.io/acme/infra-runner-controller@sha256:c2 ghcr.io/acme/infra-runner-controller:verified' "${CALLS}"
-  grep -q 'tag ghcr.io/acme/infra-runner-controller@sha256:c2 ghcr.io/acme/infra-runner-controller:latest' "${CALLS}"
+  local digest; digest=$(fixture_digest sha256:c2)
+  grep -Fq "tag ghcr.io/acme/infra-runner-controller@${digest} ghcr.io/acme/infra-runner-controller:verified" "${CALLS}"
+  grep -Fq "tag ghcr.io/acme/infra-runner-controller@${digest} ghcr.io/acme/infra-runner-controller:latest" "${CALLS}"
   [ "$(cat "${ST}/ctr_controller")" = id-sha256:c2 ]
   refute grep -q '^docker run' "${CALLS}"      # deployer itself up to date → no self-update
-  grep -q 'infra-runner@sha256:r1' "${CALLS}"
+  grep -q 'infra-runner@sha256:e1' "${CALLS}"
   [ "$(hstatus)" = ok ]
 }
 
@@ -77,7 +88,7 @@ baseline() {
 }
 
 @test "network error during verification has a distinct reason" {
-  sig uye-deployer NET; sig infra-runner-controller sha256:c1; sig infra-runner sha256:r1
+  sig uye-deployer NET; sig infra-runner-controller sha256:c1; sig infra-runner sha256:e1
   running controller id-sha256:c1
   cycle
   hreason | grep -q 'Sigstore unreachable'
@@ -158,7 +169,7 @@ baseline() {
 @test "self-update helper failing fast is detected quickly and the cycle continues" {
   sig uye-deployer sha256:d2; running deployer id-sha256:d1
   sig infra-runner-controller sha256:c1; have infra-runner-controller sha256:c1; running controller id-sha256:c1
-  sig infra-runner sha256:r1
+  sig infra-runner sha256:e1
   echo 1 > "${ST}/helper_exit"
   start=$(date +%s)
   cycle
@@ -180,7 +191,7 @@ baseline() {
 plugin_fixture() {
   baseline
   sig infra-runner-controller sha256:c1; have infra-runner-controller sha256:c1; running controller id-sha256:c1
-  sig vault-unseal sha256:v2
+  sig vault-unseal sha256:b2
   mkdir -p "${BATS_TEST_TMPDIR}/pw"
   export VAULT_CERT_IDENTITY=https://id VAULT_TOKEN=hvs.x PLUGIN_HOOK_TIMEOUT=2
   cat > "${PLUGINS_DIR}/v.plugin" <<EOF
@@ -206,8 +217,8 @@ EOF
   cycle
   [ ! -e "${BATS_TEST_TMPDIR}/pwned" ]
   [ ! -e "${BATS_TEST_TMPDIR}/pwned2" ]
-  grep -q 'pull --quiet ghcr.io/acme/vault-unseal@sha256:v2' "${CALLS}"
-  [ "$(cat "${ST}/ctr_vault-unseal")" = id-sha256:v2 ]
+  grep -q 'pull --quiet ghcr.io/acme/vault-unseal@sha256:b2' "${CALLS}"
+  [ "$(cat "${ST}/ctr_vault-unseal")" = id-sha256:b2 ]
 }
 
 @test "plugin on_update hook waits for a verified running service after inspection fails" {
@@ -235,8 +246,8 @@ EOF
 
 @test "stopped plugin service is recreated even when its image matches verified" {
   plugin_fixture
-  have vault-unseal sha256:v2; verified vault-unseal id-sha256:v2
-  running vault-unseal id-sha256:v2
+  have vault-unseal sha256:b2; verified vault-unseal id-sha256:b2
+  running vault-unseal id-sha256:b2
   touch "${ST}/stopped_vault-unseal"
   cycle
   grep -q 'compose .*up -d --no-deps vault-unseal' "${CALLS}"
