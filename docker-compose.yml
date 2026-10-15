@@ -7,15 +7,7 @@ x-logging: &default-logging
 
 services:
 
-  # ---------------------------------------------------------------------------
-  # Socket proxies
-  # Each proxy sits between its service and /var/run/docker.sock, allowing
-  # only the Docker API endpoints that service actually needs. The service
-  # containers no longer mount the socket directly.
-  #
-  # EXEC and BUILD are disabled on both proxies — these are the primary
-  # escape vectors if a service container is compromised.
-  # ---------------------------------------------------------------------------
+  # The controller proxy remains a host-level Docker path. The poller has none.
 
   controller-proxy:
     image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
@@ -31,9 +23,8 @@ services:
       INFO:       1   # docker info (used by compose internals)
       # All others (AUTH, EXEC, BUILD, PLUGINS, SYSTEM, SWARM, SECRETS) default to 0.
       # AUTH is not needed: credentials are written to config.json and sent per request.
-    # NOTE: the proxy filters API *paths*, not request bodies — with CONTAINERS+POST the
-    # client can still create a privileged container. Treat controller/deployer as
-    # host-root-equivalent; the proxy narrows the surface, it is not a sandbox.
+    # Endpoint filtering does not restrict container-create parameters. A compromised
+    # controller can still create a host-privileged container; isolate it separately.
     security_opt:
       - no-new-privileges:true
     logging: *default-logging
@@ -45,38 +36,13 @@ services:
     networks:
       - controller-proxy-net
 
-  deployer-proxy:
-    image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    environment:
-      CONTAINERS: 1   # docker compose up recreates the controller container
-      NETWORKS:   1   # docker compose manages compose networks
-      IMAGES:     1   # docker pull for digest checks
-      VOLUMES:    1   # docker compose inspects volumes
-      POST:       1
-      DELETE:     1
-      INFO:       1
-      # AUTH, EXEC, BUILD, PLUGINS, SYSTEM, SWARM, SECRETS default to 0
-    security_opt:
-      - no-new-privileges:true
-    logging: *default-logging
-    deploy:
-      resources:
-        limits:
-          memory: 128m
-          cpus: "0.25"
-    networks:
-      - deployer-proxy-net
-
   # ---------------------------------------------------------------------------
   # Controller — manages the ephemeral runner pool
   # ---------------------------------------------------------------------------
 
   controller:
-    # :verified is a LOCAL tag set by the deployer only after cosign verification
-    # (bootstrap: scripts/bootstrap-images.sh). It never exists in the registry, so
+    # :verified is a LOCAL tag set by the trusted host executor after verification.
+    # It never exists in the registry, so
     # compose must not try to pull it.
     image: ghcr.io/${GITHUB_ORG}/infra-runner-controller:verified
     pull_policy: never
@@ -87,7 +53,7 @@ services:
     depends_on:
       - controller-proxy
     # Explicit allowlist instead of `env_file: .env`: the controller must not receive
-    # secrets that only the deployer's plugin hooks need (e.g. VAULT_TOKEN). Values are
+    # secrets that belong to other services. Values are
     # interpolated from .env. Add new controller settings here.
     environment:
       RUNNER_IMAGE: ghcr.io/${GITHUB_ORG}/infra-runner:verified
@@ -142,7 +108,7 @@ services:
       - controller-net
 
   # ---------------------------------------------------------------------------
-  # Deployer — GitOps pull loop + health endpoint
+  # Poller — public signature observer and health endpoint
   # ---------------------------------------------------------------------------
 
   deployer:
@@ -152,15 +118,12 @@ services:
       context: .
       dockerfile: deployer/Dockerfile
     restart: unless-stopped
-    depends_on:
-      - deployer-proxy
-    env_file: .env
+    user: "65532:65532"
     environment:
-      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-infra-runner}
       HEALTH_PORT: ${HEALTH_PORT:-8080}
-      DOCKER_HOST: tcp://deployer-proxy:2375
-      HOOK_STATE_DIR: /var/lib/infra-runner-deployer
-      HOOK_STATE_REQUIRED: "true"
+      POLL_INTERVAL: ${POLL_INTERVAL:-60}
+      TARGETS_FILE: /etc/uye-poller/targets.json
+    read_only: true
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -170,13 +133,10 @@ services:
       # HEALTH_BIND=127.0.0.1 keeps /health off public interfaces (Docker-published ports
       # bypass host firewalls such as ufw). Default 0.0.0.0 for external uptime monitors.
       - "${HEALTH_BIND:-0.0.0.0}:${HEALTH_PORT:-8080}:${HEALTH_PORT:-8080}"
-    tmpfs:
-      - /root/.docker   # docker login writes here; ephemeral, never touches overlay fs
+    tmpfs: [/tmp]
     volumes:
-      - ${COMPOSE_PROJECT_DIR:?COMPOSE_PROJECT_DIR must be set in .env}:/workspace:ro   # deployer reads compose file + .env to apply updates
-      - deployer-state:/var/lib/infra-runner-deployer   # pending on_update hooks survive deployer restarts
-    # No GitHub App key here: the deployer needs no GitHub credential on the App path
-    # (images are public); on the PAT path it uses GITHUB_TOKEN from .env.
+      - /etc/uye-deploy/poller-targets.json:/etc/uye-poller/targets.json:ro
+      - /run/uye-deploy/status.json:/run/uye-deploy/status.json:ro
     healthcheck:
       # 503 also when the loop is wedged (stale). Docker only marks the container
       # unhealthy — it does not restart it; alert on it via /health.
@@ -186,15 +146,11 @@ services:
       retries: 3
       start_period: 120s
     networks:
-      - deployer-proxy-net
       - deployer-net
 
-volumes:
-  deployer-state:   # only hook retry markers; runner jobs still use tmpfs only
-
 networks:
-  # Service↔proxy pairs share a /26 network. No service can reach another
-  # service's proxy. Job networks get explicit /24s from RUNNER_SUBNET_PREFIX.0.0/16
+  # Only the controller has a proxy network. The poller is on deployer-net alone.
+  # Job networks get explicit /24s from RUNNER_SUBNET_PREFIX.0.0/16
   # (default 10.89.0.0/16), the range restricted by scripts/setup-egress-policy.sh.
   controller-proxy-net:
     ipam:
@@ -204,10 +160,6 @@ networks:
     ipam:
       config:
         - subnet: 172.20.0.64/26
-  deployer-proxy-net:
-    ipam:
-      config:
-        - subnet: 172.20.128.0/26
   deployer-net:
     ipam:
       config:

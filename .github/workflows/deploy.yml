@@ -126,6 +126,7 @@ jobs:
           file: ${{ matrix.file }}
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ github.sha }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
 
       # Sign by digest (immutable), not by tag. Keyless: the signature is bound to this
       # workflow's OIDC identity (deploy.yml@refs/heads/main), which the deployer requires.
