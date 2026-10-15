@@ -115,6 +115,8 @@ The script requires Docker's iptables firewall backend and checks that `DOCKER-U
 first unconditional rule in `FORWARD` before changing any rules. It fails if that hook is
 missing or bypassable; Docker's native nftables backend does not provide it. Run the script
 after Docker starts and investigate a preflight failure before starting the controller.
+It installs `infra-runner-egress.service` to reapply the rules after Docker starts or
+restarts. This preserves UFW; `iptables-persistent` conflicts with UFW on Ubuntu.
 The controller explicitly creates runner networks with IPv6 disabled.
 
 The AppArmor script installs `apparmor/infra-runner` and loads it. The controller passes

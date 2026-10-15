@@ -18,7 +18,7 @@
 # jump rules to DOCKER-USER and INPUT, so other rules on the host are left untouched.
 # Allowed traffic RETURNs (not ACCEPTs), so Docker's own isolation chains still apply.
 #
-# Options (env): RUNNER_SUBNET=10.89.0.0/16   PERSIST=1 (save with netfilter-persistent)
+# Options (env): RUNNER_SUBNET=10.89.0.0/16   PERSIST=1 (install systemd unit)
 set -euo pipefail
 
 RUNNER_SUBNET="${RUNNER_SUBNET:-10.89.0.0/16}"
@@ -138,15 +138,30 @@ fi
 echo "  Rules applied."
 
 # ---------------------------------------------------------------------------
-# 3. Persist across reboots
+# 3. Reapply after Docker starts and restarts
 # ---------------------------------------------------------------------------
 if [[ "${PERSIST}" == 1 ]]; then
-  echo "Persisting iptables rules..."
-  if ! command -v netfilter-persistent > /dev/null; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -q iptables-persistent
-  fi
-  netfilter-persistent save
-  echo "  Saved to /etc/iptables/rules.v4"
+  echo "Installing systemd egress policy unit..."
+  script_path=$(realpath "$0")
+  cat > /etc/systemd/system/infra-runner-egress.service <<EOF
+[Unit]
+Description=Apply infra-runner egress policy after Docker and UFW
+Requires=docker.service
+After=docker.service ufw.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=PERSIST=0 RUNNER_SUBNET=${RUNNER_SUBNET}
+ExecStart=${script_path}
+
+[Install]
+WantedBy=docker.service
+EOF
+  systemctl daemon-reload
+  systemctl enable --now infra-runner-egress.service
+  echo "  Enabled infra-runner-egress.service"
 fi
 
 cat <<EOF
