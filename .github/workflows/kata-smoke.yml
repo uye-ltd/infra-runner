@@ -1,0 +1,36 @@
+name: Kata runner smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      host_kernel:
+        description: Kernel release reported by the Docker host
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 15
+    env:
+      HOST_KERNEL: ${{ inputs.host_kernel }}
+    steps:
+      - name: Check guest kernel and Buildah
+        shell: bash
+        run: |
+          set -euo pipefail
+          guest_kernel=$(uname -r)
+          printf 'Guest kernel: %s\nHost kernel: %s\n' "$guest_kernel" "$HOST_KERNEL"
+          test "$guest_kernel" != "$HOST_KERNEL"
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          printf 'owner test\n' > "$work/payload"
+          cat > "$work/Dockerfile" <<'DOCKERFILE'
+          FROM ubuntu:24.04
+          COPY --chown=12345:23456 payload /root/payload
+          RUN test "$(stat -c '%u:%g' /root/payload)" = 12345:23456 && test -r /etc/shadow
+          DOCKERFILE
+          buildah build --isolation=chroot --pull=missing -t kata-workflow-smoke:local "$work"
+          buildah rmi kata-workflow-smoke:local
