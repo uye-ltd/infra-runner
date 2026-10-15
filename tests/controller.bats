@@ -415,6 +415,22 @@ PY
   grep -q -- '--log-driver json-file --log-opt max-size=10m --log-opt max-file=3' "${CALLS}"
 }
 
+@test "runner runtime is selected only when configured" {
+  gh_runners ''
+  RUNNER_RUNTIME=kata
+  reconcile_rc
+  [ "${rc}" -eq 0 ]
+  grep -q -- '^docker run -d --pull never --runtime kata ' "${CALLS}"
+  grep -q -- '-e RUNNER_KATA_DNS=1.1.1.1' "${CALLS}"
+
+  : > "${CALLS}"
+  RUNNER_RUNTIME=""
+  reconcile_rc
+  [ "${rc}" -eq 0 ]
+  refute grep -q -- '--runtime' "${CALLS}"
+  refute grep -q -- 'RUNNER_KATA_DNS' "${CALLS}"
+}
+
 @test "explicitly empty RUNNER_APPARMOR_PROFILE disables AppArmor" {
   gh_runners ''
   # must be set BEFORE sourcing: the default is applied at source time
@@ -451,4 +467,22 @@ PY
   [ "${status}" -ne 0 ]
   run env DESIRED_IDLE=3 MAX_RUNNERS=2 bash -c 'source "$1"' _ "${entry}"
   [ "${status}" -ne 0 ]
+}
+
+@test "invalid runtime and insufficient process memory fail at startup" {
+  local entry="${BATS_TEST_DIRNAME}/../controller/entrypoint.sh"
+  run env RUNNER_RUNTIME='kata;touch /tmp/bad' bash -c 'source "$1"' _ "${entry}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *'RUNNER_RUNTIME must be'* ]]
+
+  run env RUNNER_RUNTIME=kata RUNNER_KATA_DNS=300.1.1.1 bash -c 'source "$1"' _ "${entry}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *'RUNNER_KATA_DNS must be'* ]]
+
+  run env RUNNER_MEMORY=4g RUNNER_KANIKO_SIZE=5g bash -c 'source "$1"' _ "${entry}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *'RUNNER_MEMORY must exceed'* ]]
+
+  run env RUNNER_MEMORY=6g RUNNER_KANIKO_SIZE=2g bash -c 'source "$1"' _ "${entry}"
+  [ "${status}" -eq 0 ]
 }

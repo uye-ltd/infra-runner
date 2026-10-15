@@ -121,7 +121,7 @@ fi
 drop_count() {
   local chain="$1" destination="$2"
   iptables -vnxL "${chain}" | awk -v d="${destination}" \
-    '$3 == "DROP" && $10 == d { sum += $1 } END { print sum + 0 }'
+    '$3 == "DROP" && $9 == d { sum += $1 } END { print sum + 0 }'
 }
 if [[ "${SKIP_EGRESS}" != 1 ]]; then
   host_before=$(drop_count INFRA-RUNNER-IN 0.0.0.0/0)

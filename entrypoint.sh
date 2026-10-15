@@ -18,6 +18,15 @@ log() {
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2"
 }
 
+if [[ -n "${RUNNER_KATA_DNS:-}" ]]; then
+  [[ "${RUNNER_KATA_DNS}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
+    || { log error 'Invalid RUNNER_KATA_DNS'; exit 1; }
+  # Docker's embedded 127.0.0.11 resolver is unreachable from the Kata guest on
+  # a user-defined bridge. Use a public resolver permitted by the egress policy.
+  printf 'nameserver %s\n' "${RUNNER_KATA_DNS}" > /etc/resolv.conf
+  unset RUNNER_KATA_DNS
+fi
+
 if [[ -n "${RUNNER_JITCONFIG:-}" ]]; then
   jit="${RUNNER_JITCONFIG}"
   unset RUNNER_JITCONFIG
