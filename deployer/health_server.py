@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Minimal health endpoint for the infra-runner deployer.
+Minimal health endpoint for the Dockerless signature poller.
 
 GET /health  →  200 {"status":"ok",...}
                 503 {"status":"starting"|"unhealthy"|"stale"|"unknown",...}
 
-The deployer writes HEALTH_FILE (JSON with "status" and "epoch") at the end of every
+The poller writes HEALTH_FILE (JSON with "status" and "epoch") at the end of every
 cycle and whenever a deploy step fails. This server reads it on every request. If the
 file has not been written for HEALTH_MAX_AGE seconds, the loop is considered wedged and
 the response is 503 "stale" even if the last recorded status was "ok".
@@ -69,7 +69,7 @@ if __name__ == "__main__":
     server = http.server.ThreadingHTTPServer((HOST, PORT), HealthHandler)
     server.daemon_threads = True
     print(
-        json.dumps({"level": "info", "svc": "deployer", "msg": "Health server listening",
+        json.dumps({"level": "info", "svc": "poller", "msg": "Health server listening",
                     "port": PORT, "max_age_s": MAX_AGE}),
         flush=True,
     )
